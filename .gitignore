@@ -4,5 +4,8 @@ dist/
 .env.local
 .env.production
 *.log
+<<<<<<< HEAD
 bug-answer-key.md
 scratch/
+=======
+>>>>>>> f5f72692aab6dd0f78143c760cf82184223170f7

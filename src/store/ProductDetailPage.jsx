@@ -23,7 +23,7 @@ function StarRating({ rating }) {
   const stars = [];
   for (let i = 1; i <= 5; i++) {
     const filled = rating >= i;
-    const half   = !filled && rating >= i - 0.5;
+    const half = !filled && rating >= i - 0.5;
     stars.push(
       <span key={i} style={{ color: filled || half ? "#fbbf24" : "#2e2b45", fontSize: 18 }}>
         {filled ? "★" : half ? "⭑" : "☆"}
@@ -34,21 +34,21 @@ function StarRating({ rating }) {
 }
 
 export default function ProductDetailPage({ product, onBack, onAddToCart, onBuyNow }) {
-  const [qty, setQty]       = useState(1);
+  const [qty, setQty] = useState(1);
   const [imgErr, setImgErr] = useState(false);
   const [addedMsg, setAddedMsg] = useState("");
 
-  const rating      = fakeRating(product.name || product.product_name || "");
+  const rating = fakeRating(product.name || product.product_name || "");
   const reviewCount = fakeReviewCount(product.name || product.product_name || "");
-  const name        = product.name || product.product_name || "Unknown Product";
-  const brand       = product.brand || "–";
-  const type        = product.type || product.product_type || "–";
-  const price       = product.price || "–";
-  const effects     = product.effects || product.notable_effects || "–";
-  const skin        = product.skin || product.skintype || "–";
+  const name = product.name || product.product_name || "Unknown Product";
+  const brand = product.brand || "–";
+  const type = product.type || product.product_type || "–";
+  const price = product.price || "–";
+  const effects = product.effects || product.notable_effects || "–";
+  const skin = product.skin || product.skintype || "–";
   const description = product.description || `A premium ${type} by ${brand} designed to deliver ${effects} benefits for ${skin} skin types. Formulated with high-quality ingredients for effective and gentle daily use.`;
-  const imgSrc      = product.picture_src || product.img || "";
-  const tier        = product.tier || "";
+  const imgSrc = product.picture_src || product.img || "";
+  const tier = product.tier || "";
 
   const handleAdd = () => {
     onAddToCart({ ...product, name, qty });
@@ -264,11 +264,11 @@ export default function ProductDetailPage({ product, onBack, onAddToCart, onBuyN
               <div
                 data-testid="qty-display"
                 style={{
-                width: 56, height: 40, background: C.bg2,
-                border: `1px solid ${C.border}`,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                color: C.text, fontWeight: 700, fontSize: "1rem",
-              }}>{qty}</div>
+                  width: 56, height: 40, background: C.bg2,
+                  border: `1px solid ${C.border}`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: C.text, fontWeight: 700, fontSize: "1rem",
+                }}>{qty}</div>
               <button
                 onClick={() => setQty(q => q + 1)}
                 data-testid="qty-increment-btn"

@@ -222,10 +222,10 @@ body { font-family: 'DM Sans', sans-serif; }
 
 // ── Card Visual ──────────────────────────────────────────────────────────────
 function CreditCardVisual({ number, name, expiry, flipped, brand, T }) {
-  const displayNum = (number.replace(/\s/g,"") + "0000000000000000").slice(0,16)
+  const displayNum = (number.replace(/\s/g, "") + "0000000000000000").slice(0, 16)
     .match(/.{4}/g).join(" ");
   const displayName = name || "YOUR NAME";
-  const displayExp  = expiry || "MM/YY";
+  const displayExp = expiry || "MM/YY";
 
   const BrandIcon = () => {
     if (brand === "visa") return (
@@ -260,12 +260,12 @@ function CreditCardVisual({ number, name, expiry, flipped, brand, T }) {
           {/* Decorative circles */}
           <div style={{ position: "absolute", top: -30, right: -30, width: 130, height: 130, borderRadius: "50%", background: "rgba(255,255,255,0.08)" }} />
           <div style={{ position: "absolute", bottom: -20, left: -20, width: 100, height: 100, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
-          
+
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
             {/* Chip */}
             <div style={{ width: 38, height: 28, borderRadius: 5, background: "linear-gradient(135deg, #d4af37, #f5d96e)", position: "relative", overflow: "hidden" }}>
               <div style={{ position: "absolute", inset: 0, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gridTemplateRows: "1fr 1fr 1fr", gap: 0 }}>
-                {[...Array(9)].map((_,i) => <div key={i} style={{ border: "0.5px solid rgba(0,0,0,0.2)" }} />)}
+                {[...Array(9)].map((_, i) => <div key={i} style={{ border: "0.5px solid rgba(0,0,0,0.2)" }} />)}
               </div>
             </div>
             <BrandIcon />
@@ -386,8 +386,10 @@ function OrderSummary({ T, items, shippingMethod = "regular", appliedCoupon, cou
         ))}
       </div>
 
-      <div style={{ borderTop: `1.5px solid ${T.borderStrong}`, marginTop: 12, paddingTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center",
-        background: T.accentSoft, borderRadius: 12, padding: "14px 16px", marginTop: 16, border: `2px solid ${T.borderStrong}` }}>
+      <div style={{
+        borderTop: `1.5px solid ${T.borderStrong}`, marginTop: 12, paddingTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center",
+        background: T.accentSoft, borderRadius: 12, padding: "14px 16px", marginTop: 16, border: `2px solid ${T.borderStrong}`
+      }}>
         <span style={{ fontWeight: 700, fontSize: 16, color: T.text }}>Total Amount</span>
         <span data-testid="order-summary-total" style={{ fontWeight: 800, fontSize: 22, background: T.accentGrad, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
           {fmtRs(total)}
@@ -704,7 +706,7 @@ function PaymentStep({ T, data, setData, onNext, onBack }) {
         </div>
       )}
 
-      {["gopay","ovo","dana"].includes(data.payMethod) && (
+      {["gopay", "ovo", "dana"].includes(data.payMethod) && (
         <div style={{ animation: "scaleIn 0.3s ease both", padding: "20px", borderRadius: 14, background: T.accentSoft, border: `1.5px solid ${T.border}`, textAlign: "center" }}>
           <div style={{ fontSize: 32, marginBottom: 10 }}>📱</div>
           <div style={{ fontWeight: 600, color: T.text, fontSize: 15, marginBottom: 6 }}>Scan QR to Pay</div>
@@ -804,7 +806,7 @@ function ReviewStep({ T, data, items, appliedCoupon, onBack, onPay }) {
       <Section title="Payment">
         <Row label="Method" val={PAY_LABEL[data.payMethod] || "–"} />
         {data.payMethod === "card" && data.cardNum && (
-          <Row label="Card" val={`•••• •••• •••• ${data.cardNum.replace(/\s/g,"").slice(-4)}`} />
+          <Row label="Card" val={`•••• •••• •••• ${data.cardNum.replace(/\s/g, "").slice(-4)}`} />
         )}
       </Section>
 
@@ -882,7 +884,7 @@ function ProcessingOverlay({ T }) {
 
 // ── Success Screen ────────────────────────────────────────────────────────────
 function SuccessScreen({ T, data, items, onNewOrder }) {
-  const total = items.reduce((s, i) => s + i.price * i.qty, 0) + 15000 + Math.round(items.reduce((s,i)=>s+i.price*i.qty,0)*0.11);
+  const total = items.reduce((s, i) => s + i.price * i.qty, 0) + 15000 + Math.round(items.reduce((s, i) => s + i.price * i.qty, 0) * 0.11);
   const orderId = "DG-" + Math.random().toString(36).slice(2, 9).toUpperCase();
 
   return (
@@ -929,7 +931,7 @@ function SuccessScreen({ T, data, items, onNewOrder }) {
 
         {items.map(item => (
           <div key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <span style={{ fontSize: 13, color: T.textMid }}>× {item.qty} {item.name.split(" ").slice(0,3).join(" ")}…</span>
+            <span style={{ fontSize: 13, color: T.textMid }}>× {item.qty} {item.name.split(" ").slice(0, 3).join(" ")}…</span>
             <span style={{ fontSize: 13, fontWeight: 500, color: T.text }}>{fmtRs(item.price * item.qty)}</span>
           </div>
         ))}
