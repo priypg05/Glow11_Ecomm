@@ -1,11 +1,34 @@
+# Dependencies
 node_modules/
+frontend/node_modules/
+
+# Production build outputs
 dist/
+frontend/dist/
+
+# Environment files & secrets
 .env
 .env.local
 .env.production
-*.log
-<<<<<<< HEAD
-bug-answer-key.md
+frontend/.env
+frontend/.env.local
+backend/.env
+backend/.env.local
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+backend/__pycache__/
+.venv/
+venv/
+
+# Backup & scratch
+backup_pre_migration/
 scratch/
-=======
->>>>>>> f5f72692aab6dd0f78143c760cf82184223170f7
+bug-answer-key.md
+docs/bug-answer-key.md
+
+# Logs & temp files
+*.log
+.DS_Store
+Thumbs.db

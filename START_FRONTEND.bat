@@ -12,7 +12,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-cd /d "%~dp0"
+cd /d "%~dp0frontend"
 echo Installing npm packages...
 npm install
 

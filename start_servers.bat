@@ -40,11 +40,11 @@ echo ✅ npm is installed
 
 echo.
 echo Starting backend server on port 8000...
-start "GlowIQ Backend" cmd /k "cd /d "%~dp0" && %PYTHON_CMD% server.py"
+start "GlowIQ Backend" cmd /k "cd /d "%~dp0backend" && %PYTHON_CMD% server.py"
 
 echo Starting frontend...
 timeout /t 3 /nobreak
-start "GlowIQ Frontend" cmd /k "cd /d "%~dp0" && npm run dev"
+start "GlowIQ Frontend" cmd /k "cd /d "%~dp0frontend" && npm run dev"
 
 echo.
 echo ════════════════════════════════════════════════════════

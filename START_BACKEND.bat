@@ -4,7 +4,7 @@ echo   GlowIQ Backend Startup
 echo ============================================
 echo.
 
-cd /d "%~dp0"
+cd /d "%~dp0backend"
 
 set "PYTHON_EXE="
 set "PIP_EXE="
@@ -34,7 +34,7 @@ if "%PYTHON_EXE%"=="" (
 
 :: Install dependencies
 echo Installing / checking Python dependencies...
-%PIP_EXE% install fastapi uvicorn pandas numpy python-dotenv reportlab openai --quiet
+%PIP_EXE% install -r requirements.txt --quiet
 
 echo.
 echo Starting GlowIQ API on http://localhost:8000
