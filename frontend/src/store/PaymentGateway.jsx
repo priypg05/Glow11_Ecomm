@@ -121,12 +121,21 @@ const CART_ITEMS = [
 ];
 
 function fmtRs(n) {
+  if (typeof n !== "number") n = Number(n) || 0;
+  if (n < 1000) {
+    return "$" + n.toFixed(2);
+  }
   return "Rs " + Math.round(n).toLocaleString("id-ID");
 }
 
 function parsePriceValue(price) {
   if (typeof price === "number") return price;
-  return parseInt(String(price || "0").replace(/[^0-9]/g, ""), 10) || 0;
+  const s = String(price || "0").trim();
+  if (s.includes(".") && !s.includes(",")) {
+    const val = parseFloat(s.replace(/[^0-9.]/g, ""));
+    if (!isNaN(val)) return val;
+  }
+  return parseFloat(s.replace(/[^0-9.]/g, "")) || 0;
 }
 
 function normalizeCartItems(items) {
@@ -320,25 +329,41 @@ function CreditCardVisual({ number, name, expiry, flipped, brand, T }) {
 function OrderSummary({ T, items, shippingMethod = "regular", appliedCoupon, couponCode, setCouponCode, onApplyCoupon, couponMsg }) {
   const isQA = import.meta.env.VITE_APP_ENV === "qa";
   const subtotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-  const shippingRates = { regular: 15000, express: 35000, sameday: 55000 };
-  let shipping = shippingRates[shippingMethod] || 15000;
-  if (subtotal >= 100000) {
-    if (isQA) {
-      shipping = 0;
-    } else if (shippingMethod === "regular") {
-      shipping = 0;
+  const isDollar = subtotal < 1000;
+  const shippingRates = isDollar
+    ? { regular: 5.99, standard: 5.99, express: 14.99, sameday: 24.99 }
+    : { regular: 15000, standard: 15000, express: 35000, sameday: 55000 };
+  let shipping = shippingRates[shippingMethod] || (isDollar ? 5.99 : 15000);
+  const discount = appliedCoupon ? appliedCoupon.discount : 0;
+
+  if (isDollar) {
+    if ((subtotal - discount) >= 100.00 || appliedCoupon?.code === "FREESHIP") {
+      if (isQA) {
+        shipping = 0; // BUG-BE-03: waives all shipping tiers
+      } else if (shippingMethod === "regular" || shippingMethod === "standard" || appliedCoupon?.code === "FREESHIP") {
+        shipping = 0;
+      }
+    }
+  } else {
+    if (subtotal >= 100000 || appliedCoupon?.code === "FREESHIP") {
+      if (isQA) {
+        shipping = 0;
+      } else if (shippingMethod === "regular" || shippingMethod === "standard" || appliedCoupon?.code === "FREESHIP") {
+        shipping = 0;
+      }
     }
   }
 
-  const discount = appliedCoupon ? appliedCoupon.discount : 0;
-  const taxableBase = Math.max(0, subtotal - discount);
-  const taxRate = isQA ? 0.18 : 0.11;
-  const tax = isQA ? Math.floor(taxableBase * taxRate) : Math.round(taxableBase * taxRate);
+  const taxableBase = Math.max(0, isDollar ? (subtotal - discount + shipping) : (subtotal - discount));
+  const taxRate = isQA ? 0.18 : (isDollar ? 0.08 : 0.11);
+  const tax = isQA
+    ? Math.floor(taxableBase * taxRate)
+    : (isDollar ? Math.round(taxableBase * taxRate * 100) / 100 : Math.round(taxableBase * taxRate));
 
-  // Total calculation for summary display
+  // Total calculation for summary display (BUG-FE-01: omits discount in QA)
   const total = isQA
     ? subtotal + shipping + tax
-    : subtotal - discount + shipping + tax;
+    : (isDollar ? Math.round((subtotal - discount + shipping + tax) * 100) / 100 : subtotal - discount + shipping + tax);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 0, animation: "fadeSlideUp 0.4s ease both" }}>
@@ -754,21 +779,41 @@ function PaymentStep({ T, data, setData, onNext, onBack }) {
 function ReviewStep({ T, data, items, appliedCoupon, onBack, onPay }) {
   const isQA = import.meta.env.VITE_APP_ENV === "qa";
   const subtotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-  const shippingRates = { regular: 15000, express: 35000, sameday: 55000 };
-  let shipping = shippingRates[data.shipping] || 15000;
-  if (subtotal >= 100000) {
-    if (isQA) {
-      shipping = 0;
-    } else if (data.shipping === "regular") {
-      shipping = 0;
+  const isDollar = subtotal < 1000;
+  const shippingRates = isDollar
+    ? { regular: 5.99, standard: 5.99, express: 14.99, sameday: 24.99 }
+    : { regular: 15000, standard: 15000, express: 35000, sameday: 55000 };
+  let shipping = shippingRates[data.shipping] || (isDollar ? 5.99 : 15000);
+  const discount = appliedCoupon ? appliedCoupon.discount : 0;
+
+  if (isDollar) {
+    if ((subtotal - discount) >= 100.00 || appliedCoupon?.code === "FREESHIP") {
+      if (isQA) {
+        shipping = 0; // BUG-BE-03: waives all shipping tiers
+      } else if (data.shipping === "regular" || data.shipping === "standard" || appliedCoupon?.code === "FREESHIP") {
+        shipping = 0;
+      }
+    }
+  } else {
+    if (subtotal >= 100000 || appliedCoupon?.code === "FREESHIP") {
+      if (isQA) {
+        shipping = 0;
+      } else if (data.shipping === "regular" || data.shipping === "standard" || appliedCoupon?.code === "FREESHIP") {
+        shipping = 0;
+      }
     }
   }
 
-  const discount = appliedCoupon ? appliedCoupon.discount : 0;
-  const taxableBase = Math.max(0, subtotal - discount);
-  const taxRate = isQA ? 0.18 : 0.11;
-  const tax = isQA ? Math.floor(taxableBase * taxRate) : Math.round(taxableBase * taxRate);
-  const total = isQA ? subtotal + shipping + tax : subtotal - discount + shipping + tax;
+  const taxableBase = Math.max(0, isDollar ? (subtotal - discount + shipping) : (subtotal - discount));
+  const taxRate = isQA ? 0.18 : (isDollar ? 0.08 : 0.11);
+  const tax = isQA
+    ? Math.floor(taxableBase * taxRate)
+    : (isDollar ? Math.round(taxableBase * taxRate * 100) / 100 : Math.round(taxableBase * taxRate));
+
+  // Total calculation for review display (BUG-FE-01: omits discount in QA)
+  const total = isQA
+    ? subtotal + shipping + tax
+    : (isDollar ? Math.round((subtotal - discount + shipping + tax) * 100) / 100 : subtotal - discount + shipping + tax);
 
   const Section = ({ title, children }) => (
     <div style={{
@@ -1102,17 +1147,31 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
     try {
       const isQA = import.meta.env.VITE_APP_ENV === "qa";
       const subtotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-      const shippingRates = { regular: 15000, express: 35000, sameday: 55000 };
-      let shipping = shippingRates[formData.shipping] || 15000;
-      if (subtotal >= 100000) {
-        if (isQA) shipping = 0;
-        else if (formData.shipping === "regular") shipping = 0;
-      }
+      const isDollar = subtotal < 1000;
+      const shippingRates = isDollar
+        ? { regular: 5.99, standard: 5.99, express: 14.99, sameday: 24.99 }
+        : { regular: 15000, standard: 15000, express: 35000, sameday: 55000 };
+      let shipping = shippingRates[formData.shipping] || (isDollar ? 5.99 : 15000);
       const discount = appliedCoupon ? appliedCoupon.discount : 0;
-      const taxableBase = Math.max(0, subtotal - discount);
-      const taxRate = isQA ? 0.18 : 0.11;
-      const tax = isQA ? Math.floor(taxableBase * taxRate) : Math.round(taxableBase * taxRate);
-      const total = subtotal - discount + shipping + tax;
+
+      if (isDollar) {
+        if ((subtotal - discount) >= 100.00 || appliedCoupon?.code === "FREESHIP") {
+          if (isQA) shipping = 0;
+          else if (formData.shipping === "regular" || formData.shipping === "standard" || appliedCoupon?.code === "FREESHIP") shipping = 0;
+        }
+      } else {
+        if (subtotal >= 100000 || appliedCoupon?.code === "FREESHIP") {
+          if (isQA) shipping = 0;
+          else if (formData.shipping === "regular" || formData.shipping === "standard" || appliedCoupon?.code === "FREESHIP") shipping = 0;
+        }
+      }
+
+      const taxableBase = Math.max(0, isDollar ? (subtotal - discount + shipping) : (subtotal - discount));
+      const taxRate = isQA ? 0.18 : (isDollar ? 0.08 : 0.11);
+      const tax = isQA
+        ? Math.floor(taxableBase * taxRate)
+        : (isDollar ? Math.round(taxableBase * taxRate * 100) / 100 : Math.round(taxableBase * taxRate));
+      const total = isDollar ? Math.round((subtotal - discount + shipping + tax) * 100) / 100 : subtotal - discount + shipping + tax;
 
       // In QA mode, truncated order ID generation
       const orderId = isQA

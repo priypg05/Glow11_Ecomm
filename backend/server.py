@@ -7,13 +7,16 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import os
 import sqlite3
 import json
+import uuid
+import time
+import traceback
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from config import config
@@ -79,6 +82,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Section 7: Logging Middleware with X-Request-Id & logs/app.log ─────────────
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    req_id = request.headers.get("X-Request-Id") or f"req-{uuid.uuid4().hex[:10]}"
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration_ms = round((time.time() - start_time) * 1000, 2)
+        os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
+        with open(os.path.join(BASE_DIR, "logs", "app.log"), "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} [{req_id}] {request.method} {request.url.path} 500 ({duration_ms}ms)\n")
+            f.write(traceback.format_exc() + "\n")
+        raise exc
+
+    duration_ms = round((time.time() - start_time) * 1000, 2)
+    response.headers["X-Request-Id"] = req_id
+    try:
+        os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
+        with open(os.path.join(BASE_DIR, "logs", "app.log"), "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} [{req_id}] {request.method} {request.url.path} {response.status_code} ({duration_ms}ms)\n")
+    except Exception:
+        pass
+    return response
 
 # ── Load data once at startup ─────────────────────────────────────────────────
 # Resolve CSV path dynamically (supporting datasets/ directory or root backend)
@@ -175,21 +203,20 @@ def init_auth_db():
         )
     """)
 
-    c.execute("SELECT COUNT(*) FROM inventory")
-    if c.fetchone()[0] == 0:
-        c.execute(
-            "INSERT OR REPLACE INTO inventory (product_id, product_name, stock, reserved) VALUES (?, ?, ?, ?)",
-            ("1", "LANEIGE Lip Sleeping Mask", 1, 0)
-        )
-        c.execute(
-            "INSERT OR REPLACE INTO inventory (product_id, product_name, stock, reserved) VALUES (?, ?, ?, ?)",
-            ("2", "Some By Mi Toner", 20, 0)
-        )
-        c.execute(
-            "INSERT OR REPLACE INTO inventory (product_id, product_name, stock, reserved) VALUES (?, ?, ?, ?)",
-            ("3", "COSRX Snail Mucin Essence", 20, 0)
-        )
-        conn.commit()
+    # Seed standard inventory
+    seed_inventory_items = [
+        ("1", "LANEIGE Lip Sleeping Mask", 1, 0),
+        ("2", "Some By Mi Toner", 20, 0),
+        ("3", "COSRX Snail Mucin Essence", 20, 0),
+        ("1001", "Wireless Mouse", 50, 0),
+        ("1002", "USB-C Hub", 50, 0),
+        ("1003", "Out of Stock Gadget", 0, 0),
+        ("1004", "Limited Stock Cable", 3, 0),
+    ]
+    for pid, pname, stock, res in seed_inventory_items:
+        c.execute("INSERT OR REPLACE INTO inventory (product_id, product_name, stock, reserved) VALUES (?, ?, ?, ?)",
+                  (pid, pname, stock, res))
+    conn.commit()
 
     # Seed admin if doesn't exist
     admin_email = os.getenv("DEFAULT_ADMIN_EMAIL", "shivi5035singh@gmail.com")
@@ -201,11 +228,39 @@ def init_auth_db():
             "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
             (admin_email, admin_password, admin_name, "admin")
         )
-        conn.commit()
-        print(f"Admin account created: {admin_email}")
-    else:
-        print("Admin account already exists")
 
+    # Seed ShopLab benchmark test users (Section 3)
+    shoplab_users = [
+        ("customer1@shoplab.test", "Test@1234", "Customer One", "user"),
+        ("customer2@shoplab.test", "Test@1234", "Customer Two", "user"),
+        ("locked@shoplab.test", "Test@1234", "Locked Customer", "user"),
+        ("admin@shoplab.test", "Admin@1234", "ShopLab Admin", "admin"),
+    ]
+    for email, pw, name, role in shoplab_users:
+        c.execute("SELECT id FROM users WHERE email = ?", (email,))
+        if not c.fetchone():
+            c.execute(
+                "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+                (email, pw, name, role)
+            )
+
+    # Seed 3 past orders for customer2@shoplab.test if not present
+    c.execute("SELECT COUNT(*) FROM orders WHERE user_email = 'customer2@shoplab.test'")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO orders (order_id, user_email, user_name, items, subtotal, shipping, tax, total, address, created_at) VALUES (?, ?, ?, '[]', ?, ?, ?, ?, '123 Test St', CURRENT_TIMESTAMP)",
+                  ("ORD-20261118-0001", "customer2@shoplab.test", "Customer Two", 49.00, 5.99, 4.40, 59.39))
+        c.execute("INSERT INTO orders (order_id, user_email, user_name, items, subtotal, shipping, tax, total, address, created_at) VALUES (?, ?, ?, '[]', ?, ?, ?, ?, '123 Test St', CURRENT_TIMESTAMP)",
+                  ("ORD-20261118-0002", "customer2@shoplab.test", "Customer Two", 59.99, 5.99, 5.28, 71.26))
+        c.execute("INSERT INTO orders (order_id, user_email, user_name, items, subtotal, shipping, tax, total, address, created_at) VALUES (?, ?, ?, '[]', ?, ?, ?, ?, '123 Test St', CURRENT_TIMESTAMP)",
+                  ("ORD-20261118-0003", "customer2@shoplab.test", "Customer Two", 24.50, 5.99, 2.44, 32.93))
+
+    # Seed failed login attempts for locked@shoplab.test
+    c.execute("SELECT COUNT(*) FROM login_logs WHERE email = 'locked@shoplab.test'")
+    if c.fetchone()[0] == 0:
+        for _ in range(5):
+            c.execute("INSERT INTO login_logs (email, success, logged_at) VALUES ('locked@shoplab.test', 0, CURRENT_TIMESTAMP)")
+
+    conn.commit()
     conn.close()
 
 init_auth_db()
@@ -253,6 +308,16 @@ def login(body: LoginPayload):
 
         conn = get_conn()
         c = conn.cursor()
+
+        # Seeded locked user check (Section 5.1 REQ-ACC-02 & Section 8.3)
+        if body.email.strip().lower() == "locked@shoplab.test":
+            conn.close()
+            if config.IS_QA:
+                # BUG-AUTH-02: returns 401 generic error, hiding lockout
+                raise HTTPException(status_code=401, detail="Invalid email or password")
+            else:
+                # Production: matches REQ-ACC-02 "The seeded locked user always sees 'Your account is locked'"
+                raise HTTPException(status_code=423, detail="Your account is locked")
 
         # Account lockout verification
         if config.IS_QA:
@@ -495,6 +560,99 @@ def health():
     }
 
 
+# ── Section 7 & 5.1: Test Harness & Health Endpoints ─────────────────────────
+
+DEV_MAILBOX = []
+
+class ForgotPasswordPayload(BaseModel):
+    email: str
+
+class ResetPasswordPayload(BaseModel):
+    token: str
+    new_password: str
+
+@app.get("/api/health")
+def api_health():
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "env": config.ENV,
+        "products": len(df),
+    }
+
+@app.post("/api/test/reset")
+def reset_test_data():
+    if config.IS_PRODUCTION:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "FORBIDDEN", "message": "Reset endpoint disabled in production"}}
+        )
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM login_logs")
+    c.execute("DELETE FROM orders")
+    c.execute("DELETE FROM users")
+    c.execute("DELETE FROM inventory")
+    conn.commit()
+    conn.close()
+
+    init_auth_db()
+    DEV_MAILBOX.clear()
+
+    return {
+        "ok": True,
+        "status": "ok",
+        "message": "Seed data reloaded successfully",
+        "env": config.ENV,
+    }
+
+@app.get("/api/dev/mailbox")
+def get_dev_mailbox():
+    if config.IS_PRODUCTION:
+        raise HTTPException(status_code=403, detail="Mailbox unavailable in production")
+    return {"ok": True, "count": len(DEV_MAILBOX), "emails": DEV_MAILBOX}
+
+@app.post("/api/auth/forgot-password")
+def forgot_password(body: ForgotPasswordPayload):
+    email = body.email.strip().lower()
+    token = f"tok_{uuid.uuid4().hex[:16]}"
+    reset_link = f"/reset-password?token={token}"
+    entry = {
+        "id": len(DEV_MAILBOX) + 1,
+        "to": email,
+        "subject": "Reset your ShopLab password",
+        "link": reset_link,
+        "token": token,
+        "sent_at": datetime.now().isoformat(),
+        "used": False,
+    }
+    DEV_MAILBOX.append(entry)
+    return {
+        "ok": True,
+        "message": "If the email is registered, a password reset link has been sent.",
+        "mailbox_url": "/dev/mailbox"
+    }
+
+@app.post("/api/auth/reset-password")
+def reset_password(body: ResetPasswordPayload):
+    matching = [e for e in DEV_MAILBOX if e["token"] == body.token and not e["used"]]
+    if not matching:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    email_entry = matching[0]
+    email = email_entry["to"]
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("UPDATE users SET password = ? WHERE LOWER(email) = LOWER(?)", (body.new_password, email))
+    conn.commit()
+    conn.close()
+
+    email_entry["used"] = True
+    return {"ok": True, "message": "Password reset successfully"}
+
+
 @app.get("/api/recommendations")
 def get_recommendations(session_id: str = "guest"):
     try:
@@ -526,36 +684,75 @@ def apply_coupon(body: CouponPayload):
         code = body.code.strip().upper()
         if code not in config.AVAILABLE_COUPONS:
             if config.IS_QA:
+                # BUG-API-01: Returns HTTP 200 with invalid payload instead of 400
                 return {
                     "ok": False,
                     "valid": False,
                     "discount": 0.0,
                     "message": "Coupon code not recognized"
                 }
-            raise HTTPException(status_code=400, detail="Invalid coupon code")
+            raise HTTPException(status_code=400, detail="Invalid coupon")
 
         rule = config.AVAILABLE_COUPONS[code]
-        if body.subtotal < rule["min_subtotal"]:
+
+        # REQ-PRC-03: EXPIRED5 expired check
+        if rule.get("expired"):
             if config.IS_QA:
                 return {
                     "ok": False,
                     "valid": False,
                     "discount": 0.0,
-                    "message": f"Minimum subtotal of Rs {rule['min_subtotal']} required"
+                    "message": "This coupon has expired"
+                }
+            raise HTTPException(status_code=400, detail="This coupon has expired")
+
+        # Minimum subtotal check
+        if body.subtotal < rule["min_subtotal"]:
+            msg = f"Minimum subtotal of {rule['min_subtotal']} required"
+            if config.IS_QA:
+                return {
+                    "ok": False,
+                    "valid": False,
+                    "discount": 0.0,
+                    "message": msg
                 }
             raise HTTPException(
                 status_code=400,
-                detail=f"Minimum subtotal of Rs {rule['min_subtotal']} required for coupon {code}"
+                detail=f"Minimum subtotal of {rule['min_subtotal']} required for coupon {code}"
             )
 
-        if config.IS_QA:
-            discount_base = body.subtotal + body.shipping
-            calculated_discount = round(discount_base * rule["discount_percent"])
+        coupon_type = rule.get("type", "percent")
+        if coupon_type == "flat":
+            discount = float(rule.get("flat_discount", 50.0))
+        elif coupon_type == "freeship":
+            discount = float(body.shipping)
+        elif coupon_type == "category_percent":
+            # Section 8.2 logic error: in QA, ELEC15 applies to all categories
+            if config.IS_QA:
+                discount_base = body.subtotal + body.shipping
+                discount = round(discount_base * rule["discount_percent"], 2)
+            else:
+                discount = round(body.subtotal * rule["discount_percent"], 2)
         else:
-            discount_base = body.subtotal
-            calculated_discount = round(discount_base * rule["discount_percent"])
+            # percent discount (e.g. SAVE10, GLOW20, WELCOME10)
+            if config.IS_QA:
+                # BUG-BE-01: discount calculated on subtotal + shipping
+                discount_base = body.subtotal + body.shipping
+                if body.subtotal < 1000:
+                    discount = round(discount_base * rule["discount_percent"], 2)
+                else:
+                    discount = round(discount_base * rule["discount_percent"])
+            else:
+                discount_base = body.subtotal
+                if body.subtotal < 1000:
+                    discount = round(discount_base * rule["discount_percent"], 2)
+                else:
+                    discount = round(discount_base * rule["discount_percent"])
 
-        discount = min(calculated_discount, rule["max_discount"])
+        max_disc = rule.get("max_discount", float("inf"))
+        discount = min(discount, max_disc)
+        discount = max(0.0, discount)
+
         return {
             "ok": True,
             "valid": True,
@@ -631,20 +828,45 @@ def create_order(body: OrderPayload):
                               (qty, pid, qty))
 
         # Shipping charge evaluation
-        if body.subtotal >= config.FREE_SHIPPING_THRESHOLD:
-            if config.IS_QA:
-                effective_shipping = 0.0
+        if body.subtotal < 1000:
+            # Dollar pricing (Section 5.4 REQ-PRC-04)
+            has_free_ship = (body.subtotal - body.discount) >= config.FREE_SHIPPING_THRESHOLD_USD or (body.coupon_code == "FREESHIP")
+            if has_free_ship:
+                if config.IS_QA:
+                    # BUG-BE-03: free shipping waives express charges as well in QA
+                    effective_shipping = 0.0
+                else:
+                    if body.coupon_code == "FREESHIP":
+                        effective_shipping = 0.0
+                    else:
+                        effective_shipping = 0.0 if body.shipping_method in ["regular", "standard"] else body.shipping
             else:
-                effective_shipping = 0.0 if body.shipping_method == "regular" else body.shipping
+                effective_shipping = body.shipping
         else:
-            effective_shipping = body.shipping
+            # IDR / Rs pricing
+            if body.subtotal >= config.FREE_SHIPPING_THRESHOLD_IDR:
+                if config.IS_QA:
+                    effective_shipping = 0.0
+                else:
+                    effective_shipping = 0.0 if body.shipping_method == "regular" else body.shipping
+            else:
+                effective_shipping = body.shipping
 
         # Regional tax assessment
-        taxable_base = max(0.0, body.subtotal - body.discount)
-        if config.IS_QA:
-            calculated_tax = float(int(taxable_base * config.TAX_RATE))
+        if body.subtotal < 1000:
+            # Section 5.4 REQ-PRC-05: Tax 8% of (subtotal - discount + shipping)
+            taxable_base = max(0.0, body.subtotal - body.discount + effective_shipping)
+            if config.IS_QA:
+                # BUG-CFG-01 / BUG-BE-02: 18% tax in QA
+                calculated_tax = round(taxable_base * 0.18, 2)
+            else:
+                calculated_tax = round(taxable_base * config.TAX_RATE, 2)
         else:
-            calculated_tax = float(round(taxable_base * config.TAX_RATE))
+            taxable_base = max(0.0, body.subtotal - body.discount)
+            if config.IS_QA:
+                calculated_tax = float(int(taxable_base * config.TAX_RATE))
+            else:
+                calculated_tax = float(round(taxable_base * config.TAX_RATE))
 
         # Order storage
         if config.IS_QA:

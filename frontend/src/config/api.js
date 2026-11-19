@@ -11,10 +11,15 @@ export const API_BASE_URL = envApiUrl
 
 export const ENDPOINTS = {
   health: `${API_BASE_URL}/health`,
+  apiHealth: `${API_BASE_URL}/api/health`,
+  testReset: `${API_BASE_URL}/api/test/reset`,
+  mailbox: `${API_BASE_URL}/api/dev/mailbox`,
   auth: {
     login: `${API_BASE_URL}/api/auth/login`,
     register: `${API_BASE_URL}/api/auth/register`,
     adminRegister: `${API_BASE_URL}/api/auth/admin-register`,
+    forgotPassword: `${API_BASE_URL}/api/auth/forgot-password`,
+    resetPassword: `${API_BASE_URL}/api/auth/reset-password`,
   },
   admin: {
     users: `${API_BASE_URL}/api/admin/users`,

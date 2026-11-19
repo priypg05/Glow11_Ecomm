@@ -112,6 +112,66 @@ def load_data(csv_path: str = None) -> pd.DataFrame:
     today = pd.Timestamp.today().normalize()
     df["days_to_expiry"] = (df["expiry_date"] - today).dt.days
     df["product_id"] = df.index.astype(str)
+
+    # Seed ShopLab benchmark products for automated testing & worked example
+    benchmark_ids = {"1001", "1002", "1003", "1004"}
+    if not any(df["product_id"].isin(benchmark_ids)):
+        benchmark_rows = pd.DataFrame([
+            {
+                "product_id": "1001",
+                "product_name": "Wireless Mouse",
+                "brand": "LogiLab",
+                "product_type": "Electronics",
+                "price": "$24.50",
+                "price_num": 24.50,
+                "picture_src": "",
+                "skintype": "All",
+                "notable_effects": "Electronics accessory",
+                "description": "Ergonomic 2.4GHz wireless optical mouse with USB receiver.",
+                "low_sell_probability": 0.1,
+            },
+            {
+                "product_id": "1002",
+                "product_name": "USB-C Hub",
+                "brand": "TechLab",
+                "product_type": "Electronics",
+                "price": "$59.99",
+                "price_num": 59.99,
+                "picture_src": "",
+                "skintype": "All",
+                "notable_effects": "Electronics accessory",
+                "description": "7-in-1 multi-port USB-C adapter hub with 4K HDMI.",
+                "low_sell_probability": 0.1,
+            },
+            {
+                "product_id": "1003",
+                "product_name": "Out of Stock Gadget",
+                "brand": "TechLab",
+                "product_type": "Electronics",
+                "price": "$15.00",
+                "price_num": 15.00,
+                "picture_src": "",
+                "skintype": "All",
+                "notable_effects": "Electronics",
+                "description": "Out of stock test item.",
+                "low_sell_probability": 0.8,
+            },
+            {
+                "product_id": "1004",
+                "product_name": "Limited Stock Cable",
+                "brand": "TechLab",
+                "product_type": "Electronics",
+                "price": "$12.00",
+                "price_num": 12.00,
+                "picture_src": "",
+                "skintype": "All",
+                "notable_effects": "Electronics",
+                "description": "Low stock test item.",
+                "low_sell_probability": 0.2,
+            },
+        ])
+        df = pd.concat([df, benchmark_rows], ignore_index=True)
+
     return df
 
 
