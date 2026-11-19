@@ -246,8 +246,8 @@ def get_near_expiry_offers(df: pd.DataFrame) -> pd.DataFrame:
 
 # DB_PATH dynamically resolved above based on environment and location
 
-def init_click_db(db_path: str = DB_PATH):
-    con = sqlite3.connect(db_path)
+def init_click_db(db_path: str = None):
+    con = sqlite3.connect(db_path or DB_PATH)
     con.execute("""
         CREATE TABLE IF NOT EXISTS product_clicks (
             session_id   TEXT NOT NULL,
@@ -267,8 +267,8 @@ def init_click_db(db_path: str = DB_PATH):
     con.commit()
     con.close()
 
-def record_click(session_id, product_id, product_name, db_path=DB_PATH):
-    con = sqlite3.connect(db_path)
+def record_click(session_id, product_id, product_name, db_path=None):
+    con = sqlite3.connect(db_path or DB_PATH)
     con.execute(
         "INSERT OR IGNORE INTO product_clicks (session_id, product_id, product_name) "
         "VALUES (?,?,?)",
@@ -282,9 +282,9 @@ def record_click(session_id, product_id, product_name, db_path=DB_PATH):
     con.commit()
     con.close()
 
-def get_session_clicks(session_id: str, db_path: str = DB_PATH) -> dict:
+def get_session_clicks(session_id: str, db_path: str = None) -> dict:
     try:
-        con = sqlite3.connect(db_path)
+        con = sqlite3.connect(db_path or DB_PATH)
         rows = con.execute(
             "SELECT product_id, COUNT(*) as cnt FROM product_clicks "
             "WHERE session_id=? GROUP BY product_id",
@@ -295,8 +295,8 @@ def get_session_clicks(session_id: str, db_path: str = DB_PATH) -> dict:
     except Exception:
         return {}
 
-def get_top_clicked_products(df, session_id, threshold=2, db_path=DB_PATH):
-    session_clicks = get_session_clicks(session_id, db_path)
+def get_top_clicked_products(df, session_id, threshold=2, db_path=None):
+    session_clicks = get_session_clicks(session_id, db_path or DB_PATH)
     hot_ids = [pid for pid, cnt in session_clicks.items() if cnt > threshold]
     if not hot_ids:
         return pd.DataFrame()
@@ -457,14 +457,15 @@ def get_filtered_recommendations(
 # ──────────────────────────────────────────────
 
 def build_recommendation_payload(df, session_id="demo_session",
-                                  season=None, db_path=DB_PATH) -> dict:
-    init_click_db(db_path)
+                                  season=None, db_path=None) -> dict:
+    active_db = db_path or DB_PATH
+    init_click_db(active_db)
     return {
         "current_season":          season or detect_current_season(),
         "seasonal_recommendations": get_seasonal_recommendations(df, season).to_dict("records"),
         "low_selling_samples":      get_low_selling_products(df).head(8).to_dict("records"),
         "near_expiry_offers":       get_near_expiry_offers(df).head(8).to_dict("records"),
-        "top_clicked_products":     get_top_clicked_products(df, session_id, db_path=db_path).to_dict("records"),
+        "top_clicked_products":     get_top_clicked_products(df, session_id, db_path=active_db).to_dict("records"),
         "generated_at":             datetime.now().isoformat(),
     }
 
