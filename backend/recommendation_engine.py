@@ -456,16 +456,30 @@ def get_filtered_recommendations(
 # 7. MASTER RECOMMENDATION FUNCTION
 # ──────────────────────────────────────────────
 
+def _clean_df_records(df_slice):
+    """Sanitize float('nan'), inf, -inf to None for 100% JSON compliance."""
+    records = df_slice.to_dict("records")
+    cleaned = []
+    for r in records:
+        cr = {}
+        for k, v in r.items():
+            if isinstance(v, float) and (v != v or v == float("inf") or v == float("-inf")):
+                cr[k] = None
+            else:
+                cr[k] = v
+        cleaned.append(cr)
+    return cleaned
+
 def build_recommendation_payload(df, session_id="demo_session",
                                   season=None, db_path=None) -> dict:
     active_db = db_path or DB_PATH
     init_click_db(active_db)
     return {
         "current_season":          season or detect_current_season(),
-        "seasonal_recommendations": get_seasonal_recommendations(df, season).to_dict("records"),
-        "low_selling_samples":      get_low_selling_products(df).head(8).to_dict("records"),
-        "near_expiry_offers":       get_near_expiry_offers(df).head(8).to_dict("records"),
-        "top_clicked_products":     get_top_clicked_products(df, session_id, db_path=active_db).to_dict("records"),
+        "seasonal_recommendations": _clean_df_records(get_seasonal_recommendations(df, season)),
+        "low_selling_samples":      _clean_df_records(get_low_selling_products(df).head(8)),
+        "near_expiry_offers":       _clean_df_records(get_near_expiry_offers(df).head(8)),
+        "top_clicked_products":     _clean_df_records(get_top_clicked_products(df, session_id, db_path=active_db)),
         "generated_at":             datetime.now().isoformat(),
     }
 

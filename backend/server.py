@@ -74,7 +74,7 @@ all_allowed_origins = list(set(default_origins + custom_origins))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=all_allowed_origins,
-    allow_origin_regex=r"https://.*(\.devtunnels\.ms|\.vercel\.app)",
+    allow_origin_regex=r"https://.*(\.devtunnels\.ms|\.vercel\.app|\.onrender\.com)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -472,7 +472,19 @@ def set_role(body: SetRolePayload):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Recommendation Endpoints ───────────────────────────────────────────────────
+# ── System Endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/")
+def root():
+    return {
+        "name": "GlowIQ API",
+        "status": "online",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health",
+        "environment": os.getenv("APP_ENV", "production")
+    }
+
 
 @app.get("/health")
 def health():
@@ -819,9 +831,17 @@ def list_products():
             "notable_effects", "description", "low_sell_probability",
         ]
         available = [c for c in cols if c in df.columns]
-        records = df[available].copy()
-        records = records.where(pd.notnull(records), None)
-        return {"products": records.to_dict("records")}
+        raw_records = df[available].to_dict("records")
+        clean_records = []
+        for row in raw_records:
+            clean_row = {}
+            for k, v in row.items():
+                if isinstance(v, float) and (v != v or v == float("inf") or v == float("-inf")):
+                    clean_row[k] = None
+                else:
+                    clean_row[k] = v
+            clean_records.append(clean_row)
+        return {"products": clean_records}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
