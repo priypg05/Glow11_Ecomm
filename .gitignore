@@ -32,3 +32,11 @@ docs/bug-answer-key.md
 *.log
 .DS_Store
 Thumbs.db
+
+.env
+.env.*
+!.env.example
+
+backend/database/*.db
+backend/database/*.sqlite
+backend/database/*.sqlite3
