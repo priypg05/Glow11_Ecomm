@@ -109,10 +109,12 @@ print("Click tracking database ready")
 # ── AUTH DATABASE SETUP ────────────────────────────────────────────────────────
 # Resolve SQLite database path dynamically (supporting database/ directory or env)
 AUTH_DB_PATH = os.getenv("DATABASE_PATH")
-if not AUTH_DB_PATH or not os.path.exists(AUTH_DB_PATH):
+if not AUTH_DB_PATH:
     c1 = os.path.join(BASE_DIR, "database", "users.db")
     c2 = os.path.join(BASE_DIR, "users.db")
-    AUTH_DB_PATH = c1 if os.path.exists(c1) else c2
+    AUTH_DB_PATH = c1 if os.path.exists(c1) else (c2 if os.path.exists(c2) else c1)
+
+os.makedirs(os.path.dirname(AUTH_DB_PATH), exist_ok=True)
 
 def get_conn():
     conn = sqlite3.connect(AUTH_DB_PATH)

@@ -18,8 +18,11 @@ import re
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-JS_FILE    = os.path.join(BASE_DIR, "src", "data", "products.js")
-CSV_OUTPUT = os.path.join(BASE_DIR, "Skin_Care.csv")
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+_js_1 = os.path.join(PROJECT_ROOT, "frontend", "src", "data", "products.js")
+_js_2 = os.path.join(BASE_DIR, "src", "data", "products.js")
+JS_FILE    = _js_1 if os.path.exists(_js_1) else _js_2
+CSV_OUTPUT = os.path.join(BASE_DIR, "datasets", "Skin_Care.csv")
 
 # ── Read the JS file ──────────────────────────────────────────────────────────
 print(f"📂 Reading: {JS_FILE}")

@@ -203,7 +203,13 @@ async def analyze_skin(body: SkinAnalysisRequest):
 
     FREE — uses Groq free tier (no credit card required).
     """
-    client   = get_groq_client()
+    try:
+        client = get_groq_client()
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="AI Skin Analysis is unconfigured: GROQ_API_KEY is not set. Please add GROQ_API_KEY to your environment variables."
+        )
     warnings = []
 
     # Build the full data-URL Groq expects

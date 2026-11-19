@@ -21,7 +21,8 @@ warnings.filterwarnings("ignore")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _click_db_candidate_1 = os.path.join(BASE_DIR, "database", "skincare_clicks.db")
 _click_db_candidate_2 = os.path.join(BASE_DIR, "skincare_clicks.db")
-DB_PATH = os.getenv("CLICK_DB_PATH") or (_click_db_candidate_1 if os.path.exists(_click_db_candidate_1) else _click_db_candidate_2)
+DB_PATH = os.getenv("CLICK_DB_PATH") or (_click_db_candidate_1 if os.path.exists(_click_db_candidate_1) else (_click_db_candidate_2 if os.path.exists(_click_db_candidate_2) else _click_db_candidate_1))
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # ── Semantic model (optional — falls back to keywords if unavailable) ─────────
 

@@ -1,13 +1,17 @@
 #!/usr/bin/env python
 import sys
-sys.path.insert(0, r'C:\Users\shivi\Downloads\glow10')
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE_DIR)
 
 print("Testing recommendation engine...")
 try:
     from recommendation_engine import load_data, build_recommendation_payload, init_click_db
-    import os
     
-    csv_path = r'C:\Users\shivi\Downloads\glow10\Skin_Care.csv'
+    c1 = os.path.join(BASE_DIR, "datasets", "Skin_Care.csv")
+    c2 = os.path.join(BASE_DIR, "Skin_Care.csv")
+    csv_path = c1 if os.path.exists(c1) else c2
     if not os.path.exists(csv_path):
         print(f'CSV file not found: {csv_path}')
         sys.exit(1)
