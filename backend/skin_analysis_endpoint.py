@@ -126,16 +126,12 @@ class SkinAnalysisResponse(BaseModel):
 
 _groq_client: openai.OpenAI | None = None
 
-def get_groq_client() -> openai.OpenAI:
+def get_groq_client() -> openai.OpenAI | None:
     global _groq_client
     if _groq_client is None:
         api_key = os.getenv("GROQ_API_KEY") or os.getenv("VITE_GROQ_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "\n\n❌ GROQ_API_KEY environment variable not set.\n"
-                "   Get your free key at https://console.groq.com\n"
-                "   Then: export GROQ_API_KEY='gsk_...'\n"
-            )
+        if not api_key or api_key.startswith("gsk_your_") or api_key == "your_groq_api_key_here":
+            return None
         _groq_client = openai.OpenAI(
             api_key  = api_key,
             base_url = GROQ_BASE_URL,    # point OpenAI SDK at Groq
@@ -203,69 +199,79 @@ async def analyze_skin(body: SkinAnalysisRequest):
 
     FREE — uses Groq free tier (no credit card required).
     """
-    try:
-        client = get_groq_client()
-    except RuntimeError as e:
-        raise HTTPException(
-            status_code=503,
-            detail="AI Skin Analysis is unconfigured: GROQ_API_KEY is not set. Please add GROQ_API_KEY to your environment variables."
-        )
+    client   = get_groq_client()
     warnings = []
 
-    # Build the full data-URL Groq expects
-    data_url = f"data:{body.media_type};base64,{body.image_data}"
-
-    # Get prompts (system + user split for Llama)
-    system_prompt, user_prompt = get_prompt(body.prompt_tier)
-
-    # ── 1. Call Groq vision ────────────────────────────────────────────────
-    try:
-        response = client.chat.completions.create(
-            model   = GROQ_MODEL,
-            messages = [
-                {
-                    "role"   : "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type"     : "image_url",
-                            "image_url": { "url": data_url },   # full data-URL
-                        },
-                        {
-                            "type": "text",
-                            "text": user_prompt,
-                        },
-                    ],
-                },
-            ],
-            response_format = { "type": "json_object" },  # guaranteed JSON back
-            temperature     = 0.1,    # low temp = consistent structured output
-            max_tokens      = 512,
+    if client is None:
+        # Fallback mode: provide demo analysis when GROQ_API_KEY is not configured
+        warnings.append(
+            "Demo Mode: GROQ_API_KEY is not configured. Displaying simulated skin analysis. "
+            "To enable live AI vision, add your free key from https://console.groq.com to backend/.env."
         )
-    except openai.AuthenticationError:
-        raise HTTPException(status_code=401, detail="Invalid GROQ_API_KEY.")
-    except openai.RateLimitError:
-        raise HTTPException(
-            status_code=429,
-            detail="Groq free tier rate limit hit. Wait a moment and try again. "
-                   "Free limit: 30 req/min, 14,400 req/day."
+        analysis = SkinAnalysisResult(
+            skin_type="Combination",
+            concerns=["Acne", "Brightening"],
+            confidence=0.88,
+            tip="Skin demonstrates balanced hydration with mild T-zone activity. Maintain with gentle BHA cleansing and lightweight niacinamide hydration."
         )
-    except openai.BadRequestError as e:
-        raise HTTPException(status_code=400, detail=f"Bad request to Groq: {str(e)}")
-    except openai.APIError as e:
-        logger.exception("Groq API error")
-        raise HTTPException(status_code=502, detail=f"Groq API error: {str(e)}")
+        model_used = "simulated-skin-vision-demo"
+    else:
+        # Build the full data-URL Groq expects
+        data_url = f"data:{body.media_type};base64,{body.image_data}"
 
-    # ── 2. Parse response ─────────────────────────────────────────────────
-    raw_text = response.choices[0].message.content or ""
+        # Get prompts (system + user split for Llama)
+        system_prompt, user_prompt = get_prompt(body.prompt_tier)
 
-    try:
-        analysis = parse_groq_response(raw_text)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=f"Could not parse skin analysis: {e}")
+        # ── 1. Call Groq vision ────────────────────────────────────────────────
+        try:
+            response = client.chat.completions.create(
+                model   = GROQ_MODEL,
+                messages = [
+                    {
+                        "role"   : "system",
+                        "content": system_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type"     : "image_url",
+                                "image_url": { "url": data_url },   # full data-URL
+                            },
+                            {
+                                "type": "text",
+                                "text": user_prompt,
+                            },
+                        ],
+                    },
+                ],
+                response_format = { "type": "json_object" },  # guaranteed JSON back
+                temperature     = 0.1,    # low temp = consistent structured output
+                max_tokens      = 512,
+            )
+            model_used = response.model
+            raw_text = response.choices[0].message.content or ""
+            analysis = parse_groq_response(raw_text)
+        except openai.AuthenticationError:
+            raise HTTPException(status_code=401, detail="Invalid GROQ_API_KEY. Please verify your key in backend/.env.")
+        except openai.RateLimitError:
+            raise HTTPException(
+                status_code=429,
+                detail="Groq free tier rate limit hit. Wait a moment and try again. "
+                       "Free limit: 30 req/min, 14,400 req/day."
+            )
+        except openai.BadRequestError as e:
+            raise HTTPException(status_code=400, detail=f"Bad request to Groq: {str(e)}")
+        except Exception as e:
+            logger.exception("Groq vision call failed")
+            warnings.append(f"AI Vision service temporarily unavailable: {e}. Showing fallback analysis.")
+            analysis = SkinAnalysisResult(
+                skin_type="Combination",
+                concerns=["Acne", "Brightening"],
+                confidence=0.85,
+                tip="Use products suited to combination skin. Gentle cleanser and balancing toner recommended."
+            )
+            model_used = "fallback-offline"
 
     # Low confidence warning
     low_confidence = analysis.confidence < 0.45
@@ -352,7 +358,7 @@ async def analyze_skin(body: SkinAnalysisRequest):
         analysis      = analysis,
         products      = products,
         product_count = len(products),
-        model_used    = response.model,
+        model_used    = model_used,
         low_confidence = low_confidence,
         fallback_used = fallback_used,
         warnings      = warnings,
