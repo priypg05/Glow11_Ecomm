@@ -29,8 +29,8 @@ const GROQ_MODEL   = "meta-llama/llama-4-scout-17b-16e-instruct";
 const GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions";
 
 // Route through FastAPI server by default so browser never exposes API keys
-const USE_SERVER   = Boolean(SERVER_URL);
 const SERVER_URL   = ENDPOINTS.analyzeSkin;
+const USE_SERVER   = Boolean(SERVER_URL);
 // ───────────────────────────────────────────────────────────────────────────
 
 const SKIN_TYPE_COLORS = {
