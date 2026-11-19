@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-APP_ENV = os.getenv("APP_ENV", "production").lower().strip()
+APP_ENV = os.getenv("APP_ENV", "qa").lower().strip()
 
 class AppConfig:
     ENV = APP_ENV
