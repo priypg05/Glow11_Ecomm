@@ -15,7 +15,7 @@ This document lists the formal functional requirements and requirement IDs for t
 - **REQ-ACC-02 (Login)**:
   - Input: Email + password.
   - Rules: Wrong password shows "Invalid email or password" (same message for unknown email). After 5 wrong attempts within 15 minutes, the account is locked for 15 minutes.
-  - Seeded locked user (`locked@shoplab.test`) always sees "Your account is locked" in Production (in QA, masked by BUG-AUTH-02).
+  - Seeded locked user (`locked@shoplab.test`) always sees "Your account is locked".
 
 - **REQ-ACC-03 (Logout)**:
   - Ends the session; cart contents of a logged-in user are persisted for the next login.

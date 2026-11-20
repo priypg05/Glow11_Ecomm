@@ -32,10 +32,11 @@ export async function dbLogin(email, password) {
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      return { ok: false, message: err.detail || `Login failed (${resp.status})` };
+      const msg = err.error?.message || err.detail || `Login failed (${resp.status})`;
+      return { ok: false, message: msg };
     }
     const data = await resp.json();
-    return { ok: true, user: data.user };
+    return { ok: true, user: data.user, message: data.message };
   } catch (e) {
     console.error("dbLogin error:", e);
     return { ok: false, message: "Network error: " + e.message };
@@ -45,18 +46,20 @@ export async function dbLogin(email, password) {
 // --------------------------------------------------------------------------
 // Register
 // --------------------------------------------------------------------------
-export async function dbRegister(email, password, name) {
+export async function dbRegister(email, password, name, confirm_password = "") {
   try {
     const resp = await fetch(`${BACKEND_URL}/api/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: email.trim(), password, name: name.trim() }),
+      body: JSON.stringify({ email: email.trim(), password, confirm_password, name: name.trim() }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      return { ok: false, message: err.detail || `Registration failed (${resp.status})` };
+      const msg = err.error?.message || err.detail || `Registration failed (${resp.status})`;
+      return { ok: false, message: msg };
     }
-    return { ok: true };
+    const data = await resp.json();
+    return { ok: true, user: data.user, message: data.message };
   } catch (e) {
     console.error("dbRegister error:", e);
     return { ok: false, message: "Network error: " + e.message };

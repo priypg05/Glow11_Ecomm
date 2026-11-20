@@ -4,13 +4,25 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GlowIQ — Skincare Intelligence Dashboard</title>
+    <title>ShopLab / GlowIQ E-Commerce</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+    <!-- Section 9: Monitoring Script Slot (enabled only when OBSERVE_KEY is set) -->
+    <script>
+      (function() {
+        const observeKey = "%VITE_OBSERVE_KEY%";
+        if (observeKey && !observeKey.startsWith("%") && observeKey.trim() !== "") {
+          window.__OBSERVE_KEY__ = observeKey;
+          console.log("[ShopLab Monitoring] Initialized with OBSERVE_KEY:", observeKey);
+          // QA / Semantic User Journey recording snippet placeholder
+        }
+      })();
+    </script>
   </head>
   <body>
-    <!-- sql.js: in-browser SQLite (must load before React app) -->
+    <!-- sql.js: in-browser SQLite -->
     <script src="/sql-wasm.js"></script>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>

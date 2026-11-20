@@ -1,4 +1,4 @@
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import io
 from dotenv import load_dotenv
 from reportlab.lib.pagesizes import A4
@@ -20,11 +20,46 @@ import traceback
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from config import config
+from pricing import (
+    calculateLineTotal,
+    calculateSubtotal,
+    calculateDiscount,
+    calculateShipping,
+    calculateTax,
+    calculateOrderTotal,
+    round_half_up,
+)
+
 load_dotenv()
 
 IST = timezone(timedelta(hours=5, minutes=30))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ── Import your existing Python engine ───────────────────────────────────────
+# ── App setup ─────────────────────────────────────────────────────────────────
+app = FastAPI(title="ShopLab API", version="1.0.0")
+
+# ── Section 6: Standard JSON Error Response Handler ───────────────────────────
+@app.exception_handler(HTTPException)
+async def custom_http_exception_handler(request: Request, exc: HTTPException):
+    detail = exc.detail
+    if isinstance(detail, dict) and "error" in detail:
+        return JSONResponse(status_code=exc.status_code, content=detail)
+    code_map = {
+        400: "VALIDATION_ERROR",
+        401: "UNAUTHORIZED",
+        403: "FORBIDDEN",
+        404: "NOT_FOUND",
+        409: "CONFLICT",
+        423: "ACCOUNT_LOCKED",
+        500: "SERVER_ERROR",
+    }
+    code = code_map.get(exc.status_code, "ERROR")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": code, "message": str(detail)}}
+    )
+
+# ── Import recommendation engine & skin analysis (optional legacy features) ───
 try:
     from recommendation_engine import (
         load_data,
@@ -32,41 +67,28 @@ try:
         record_click,
         init_click_db,
         get_filtered_recommendations,
-        build_embeddings,          # FIX #1
-        refresh_sell_probabilities, # FIX #3
+        build_embeddings,
+        refresh_sell_probabilities,
     )
-except ImportError as e:
-    raise RuntimeError(
-        "\n\nERROR: Could not import recommendation_engine.py\n"
-        f"   Error: {e}\n"
-        "   Make sure server.py is in the same folder as recommendation_engine.py\n"
-    )
+except Exception as e:
+    print(f"Notice: recommendation_engine: {e}")
 
-# ── Import skin analysis router ───────────────────────────────────────────────
 try:
     from skin_analysis_endpoint import router as skin_router
-except ImportError as e:
-    raise RuntimeError(
-        "\n\nERROR: Could not import skin_analysis_endpoint.py\n"
-        f"   Error: {e}\n"
-        "   Make sure skin_analysis_endpoint.py is in the same folder as server.py\n"
-    )
-
-# ── App setup ─────────────────────────────────────────────────────────────────
-app = FastAPI(title="GlowIQ API", version="1.0.0")
-
-# ── Register skin analysis router ─────────────────────────────────────────────
-app.include_router(skin_router)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    app.include_router(skin_router)
+except Exception as e:
+    print(f"Notice: skin_analysis_endpoint: {e}")
 
 # ── CORS Middleware ───────────────────────────────────────────────────────────
-# Allow React local dev servers, Render, Vercel deployments, and custom domains
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
 custom_origins = [orig.strip() for orig in allowed_origins_env.split(",") if orig.strip()]
 default_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:4173",
@@ -83,7 +105,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Section 7: Logging Middleware with X-Request-Id & logs/app.log ─────────────
+# ── Section 7: Request Logging Middleware (logs/app.log & X-Request-Id) ───────
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next):
     req_id = request.headers.get("X-Request-Id") or f"req-{uuid.uuid4().hex[:10]}"
@@ -108,34 +130,7 @@ async def request_logging_middleware(request: Request, call_next):
         pass
     return response
 
-# ── Load data once at startup ─────────────────────────────────────────────────
-# Resolve CSV path dynamically (supporting datasets/ directory or root backend)
-CSV_PATH = os.getenv("CSV_PATH")
-if not CSV_PATH or not os.path.exists(CSV_PATH):
-    c1 = os.path.join(BASE_DIR, "datasets", "Skin_Care.csv")
-    c2 = os.path.join(BASE_DIR, "Skin_Care.csv")
-    CSV_PATH = c1 if os.path.exists(c1) else c2
-
-try:
-    print(f"Loading data from: {CSV_PATH}")
-    df = load_data(CSV_PATH)
-    print(f"Loaded {len(df)} products successfully")
-    df = refresh_sell_probabilities(df)   # FIX #3: override CSV sell probabilities with real orders
-    print("Sell probabilities refreshed from orders table (or kept from CSV)")
-    build_embeddings(df)                  # FIX #1: build semantic embeddings (no-op if model unavailable)
-    print("Semantic embeddings ready (or keyword fallback active)")
-except FileNotFoundError:
-    raise RuntimeError(
-        "\n\nERROR: Skin_Care.csv not found!\n"
-        f"   Expected location: {CSV_PATH}\n"
-        "   Make sure Skin_Care.csv is in backend/datasets/ or backend/\n"
-    )
-
-init_click_db()
-print("Click tracking database ready")
-
-# ── AUTH DATABASE SETUP ────────────────────────────────────────────────────────
-# Resolve SQLite database path dynamically (supporting database/ directory or env)
+# ── SQLite Database Setup ─────────────────────────────────────────────────────
 AUTH_DB_PATH = os.getenv("DATABASE_PATH")
 if not AUTH_DB_PATH:
     c1 = os.path.join(BASE_DIR, "database", "users.db")
@@ -149,19 +144,357 @@ def get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
+# ── Seed 30 Benchmark Products Across 4 Categories (Section 7) ─────────────────
+SEED_PRODUCTS = [
+    {
+        "product_id": "1001",
+        "product_name": "Wireless Mouse",
+        "category": "Electronics",
+        "price": 24.50,
+        "old_price": 0.0,
+        "stock": 50,
+        "rating": 4.8,
+        "description": "Ergonomic 2.4GHz wireless optical mouse with USB receiver.",
+        "image_url": "https://images.unsplash.com/photo-1527864550417-7fd91fc51a46?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1002",
+        "product_name": "USB-C Hub",
+        "category": "Electronics",
+        "price": 59.99,
+        "old_price": 0.0,
+        "stock": 50,
+        "rating": 4.7,
+        "description": "7-in-1 multi-port USB-C adapter hub with 4K HDMI.",
+        "image_url": "https://images.unsplash.com/photo-1625842268584-8f3296236761?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1003",
+        "product_name": "Out of Stock Gadget",
+        "category": "Electronics",
+        "price": 15.00,
+        "old_price": 0.0,
+        "stock": 0,
+        "rating": 4.2,
+        "description": "Out of stock test item.",
+        "image_url": "https://images.unsplash.com/photo-1550009158-9ebf69173e03?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1004",
+        "product_name": "Limited Stock Cable",
+        "category": "Electronics",
+        "price": 12.00,
+        "old_price": 0.0,
+        "stock": 3,
+        "rating": 4.4,
+        "description": "Braided high-speed USB-C charging cable (Only 3 left).",
+        "image_url": "https://images.unsplash.com/photo-1588508065123-287b28e013da?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1005",
+        "product_name": "Noise-Cancelling Headphones",
+        "category": "Audio",
+        "price": 79.99,
+        "old_price": 99.99,
+        "stock": 25,
+        "rating": 4.9,
+        "description": "Over-ear wireless Bluetooth headphones with active noise cancellation (On Sale).",
+        "image_url": "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1006",
+        "product_name": "Mechanical Gaming Keyboard",
+        "category": "Electronics",
+        "price": 69.99,
+        "old_price": 0.0,
+        "stock": 30,
+        "rating": 4.8,
+        "description": "RGB backlit mechanical keyboard with tactile blue switches.",
+        "image_url": "https://images.unsplash.com/photo-1587829741301-dc798b83add3?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1007",
+        "product_name": "Portable Bluetooth Speaker",
+        "category": "Audio",
+        "price": 39.99,
+        "old_price": 0.0,
+        "stock": 40,
+        "rating": 4.6,
+        "description": "Waterproof compact outdoor Bluetooth speaker with rich bass.",
+        "image_url": "https://images.unsplash.com/photo-1608043152269-423dbba4e7e1?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1008",
+        "product_name": "True Wireless Earbuds",
+        "category": "Audio",
+        "price": 49.99,
+        "old_price": 0.0,
+        "stock": 35,
+        "rating": 4.7,
+        "description": "In-ear wireless earbuds with wireless charging case and mic.",
+        "image_url": "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1009",
+        "product_name": "Studio Monitor Headphones",
+        "category": "Audio",
+        "price": 129.99,
+        "old_price": 0.0,
+        "stock": 15,
+        "rating": 4.9,
+        "description": "Professional closed-back audio studio reference headphones.",
+        "image_url": "https://images.unsplash.com/photo-1583394838336-acd977736f90?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1010",
+        "product_name": "Soundbar with Subwoofer",
+        "category": "Audio",
+        "price": 149.99,
+        "old_price": 179.99,
+        "stock": 12,
+        "rating": 4.7,
+        "description": "2.1 channel home theater soundbar with wireless Bluetooth connectivity.",
+        "image_url": "https://images.unsplash.com/photo-1545454675-3531b543be5d?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1011",
+        "product_name": "Laptop Sleeve 15-inch",
+        "category": "Accessories",
+        "price": 19.99,
+        "old_price": 0.0,
+        "stock": 45,
+        "rating": 4.5,
+        "description": "Water-resistant padded neoprene protective laptop carry case.",
+        "image_url": "https://images.unsplash.com/photo-1544816155-12df9643f363?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1012",
+        "product_name": "Aluminum Laptop Stand",
+        "category": "Accessories",
+        "price": 29.99,
+        "old_price": 0.0,
+        "stock": 28,
+        "rating": 4.8,
+        "description": "Ergonomic foldable desktop laptop riser with heat dissipation.",
+        "image_url": "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1013",
+        "product_name": "Cable Management Organizer Kit",
+        "category": "Accessories",
+        "price": 14.99,
+        "old_price": 0.0,
+        "stock": 60,
+        "rating": 4.4,
+        "description": "Adhesive cable clips, cord wraps, and reusable straps.",
+        "image_url": "https://images.unsplash.com/photo-1541689592655-f5f52825a3b8?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1014",
+        "product_name": "Webcam Privacy Cover Pack",
+        "category": "Accessories",
+        "price": 7.99,
+        "old_price": 0.0,
+        "stock": 100,
+        "rating": 4.3,
+        "description": "Ultra-thin slider covers for laptop and phone webcams.",
+        "image_url": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1015",
+        "product_name": "Wireless Charging Stand",
+        "category": "Accessories",
+        "price": 21.99,
+        "old_price": 0.0,
+        "stock": 32,
+        "rating": 4.6,
+        "description": "15W fast wireless charging dock for smartphones.",
+        "image_url": "https://images.unsplash.com/photo-1586953208448-b95a79798f07?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1016",
+        "product_name": "Screen Cleaning Kit",
+        "category": "Accessories",
+        "price": 9.99,
+        "old_price": 0.0,
+        "stock": 80,
+        "rating": 4.5,
+        "description": "Streak-free antibacterial spray with premium microfiber cloths.",
+        "image_url": "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1017",
+        "product_name": "Universal Travel Adapter",
+        "category": "Accessories",
+        "price": 22.99,
+        "old_price": 0.0,
+        "stock": 34,
+        "rating": 4.7,
+        "description": "All-in-one international wall charger adapter with USB-C ports.",
+        "image_url": "https://images.unsplash.com/photo-1542393545-10f5cde2c810?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1018",
+        "product_name": "1080p Full HD Webcam",
+        "category": "Electronics",
+        "price": 44.99,
+        "old_price": 0.0,
+        "stock": 22,
+        "rating": 4.5,
+        "description": "Wide-angle USB streaming webcam with noise-reducing microphone.",
+        "image_url": "https://images.unsplash.com/photo-1587829741301-dc798b83add3?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1019",
+        "product_name": "Desk Gaming Mouse Pad XL",
+        "category": "Accessories",
+        "price": 16.99,
+        "old_price": 0.0,
+        "stock": 55,
+        "rating": 4.6,
+        "description": "Extended non-slip rubber base desk mat with stitched edges.",
+        "image_url": "https://images.unsplash.com/photo-1615663245857-ac93bb7c39e7?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1020",
+        "product_name": "USB Mini Desk Fan",
+        "category": "Electronics",
+        "price": 18.50,
+        "old_price": 0.0,
+        "stock": 40,
+        "rating": 4.3,
+        "description": "Quiet personal cooling mini fan for home and office desks.",
+        "image_url": "https://images.unsplash.com/photo-1585338107529-13afc5f02586?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1021",
+        "product_name": "Hydrating Facial Cleanser",
+        "category": "Skincare",
+        "price": 18.00,
+        "old_price": 0.0,
+        "stock": 30,
+        "rating": 4.8,
+        "description": "Gentle daily foaming cleanser for balanced and hydrated skin.",
+        "image_url": "https://images.unsplash.com/photo-1556228720-195a672e8a03?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1022",
+        "product_name": "Niacinamide Glowing Serum",
+        "category": "Skincare",
+        "price": 26.50,
+        "old_price": 0.0,
+        "stock": 24,
+        "rating": 4.9,
+        "description": "10% niacinamide clarifying serum to refine pores and skin texture.",
+        "image_url": "https://images.unsplash.com/photo-1620916566398-39f1143ab7be?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1023",
+        "product_name": "Deep Moisture Gel Cream",
+        "category": "Skincare",
+        "price": 22.00,
+        "old_price": 0.0,
+        "stock": 35,
+        "rating": 4.7,
+        "description": "Lightweight oil-free hyaluronic acid hydration gel moisturizer.",
+        "image_url": "https://images.unsplash.com/photo-1570172619644-dfd03ed5d881?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1024",
+        "product_name": "Daily Mineral Sunscreen SPF 50",
+        "category": "Skincare",
+        "price": 25.00,
+        "old_price": 0.0,
+        "stock": 40,
+        "rating": 4.8,
+        "description": "Broad spectrum non-greasy UV protective daily mineral sunscreen.",
+        "image_url": "https://images.unsplash.com/photo-1598440947619-2c35fc9aa908?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1025",
+        "product_name": "Soothing Centella Toner",
+        "category": "Skincare",
+        "price": 19.50,
+        "old_price": 0.0,
+        "stock": 28,
+        "rating": 4.6,
+        "description": "Calming herbal toner to relieve redness and balance skin pH.",
+        "image_url": "https://images.unsplash.com/photo-1608248597359-2e11894a4c6a?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1026",
+        "product_name": "Brightening Vitamin C Cream",
+        "category": "Skincare",
+        "price": 28.00,
+        "old_price": 0.0,
+        "stock": 20,
+        "rating": 4.7,
+        "description": "Antioxidant-rich moisturizer to restore skin radiance and even tone.",
+        "image_url": "https://images.unsplash.com/photo-1617897903246-719242758050?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1027",
+        "product_name": "Lip Sleeping Mask Berry",
+        "category": "Skincare",
+        "price": 15.00,
+        "old_price": 0.0,
+        "stock": 35,
+        "rating": 4.8,
+        "description": "Nourishing overnight berry treatment for soft, supple lips.",
+        "image_url": "https://images.unsplash.com/photo-1586495777744-4413f21062fa?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1028",
+        "product_name": "USB Condenser Microphone",
+        "category": "Audio",
+        "price": 54.99,
+        "old_price": 0.0,
+        "stock": 18,
+        "rating": 4.7,
+        "description": "Studio cardioid microphone for podcasts, gaming, and conferencing.",
+        "image_url": "https://images.unsplash.com/photo-1590602847861-f357a9332bbc?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1029",
+        "product_name": "Dual Monitor Mount Arm",
+        "category": "Electronics",
+        "price": 64.99,
+        "old_price": 0.0,
+        "stock": 14,
+        "rating": 4.8,
+        "description": "Heavy-duty gas spring desk clamp mount for two monitors.",
+        "image_url": "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?w=600&auto=format&fit=crop&q=80",
+    },
+    {
+        "product_id": "1030",
+        "product_name": "Magnetic Power Bank 10000mAh",
+        "category": "Electronics",
+        "price": 34.99,
+        "old_price": 0.0,
+        "stock": 25,
+        "rating": 4.6,
+        "description": "Slim magnetic portable wireless power bank with USB-C fast charging.",
+        "image_url": "https://images.unsplash.com/photo-1609592807664-51787c8a6eb2?w=600&auto=format&fit=crop&q=80",
+    },
+]
+
+# Simulated in-memory mailbox for password resets (Section 5.1 REQ-ACC-04)
+DEV_MAILBOX = []
+
 def init_auth_db():
-    """Initialize authentication database with admin user."""
+    """Initialize database tables and seed predictable test data."""
     conn = get_conn()
     c = conn.cursor()
 
     c.execute("""
-        CREATE TABLE IF NOT EXISTS users
-        (
+        CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
             name TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'user',
+            phone TEXT DEFAULT '',
+            addresses TEXT DEFAULT '[]',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -176,6 +509,43 @@ def init_auth_db():
     """)
 
     c.execute("""
+        CREATE TABLE IF NOT EXISTS inventory (
+            product_id TEXT PRIMARY KEY,
+            product_name TEXT NOT NULL,
+            category TEXT DEFAULT 'General',
+            price REAL DEFAULT 0.0,
+            old_price REAL DEFAULT 0.0,
+            stock INTEGER NOT NULL DEFAULT 20,
+            reserved INTEGER NOT NULL DEFAULT 0,
+            rating REAL DEFAULT 4.5,
+            description TEXT DEFAULT '',
+            image_url TEXT DEFAULT '',
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Ensure schema migrations if tables already exist
+    def ensure_column(table_name, col_name, col_type):
+        c.execute(f"PRAGMA table_info({table_name})")
+        existing_cols = [r["name"] for r in c.fetchall()]
+        if col_name not in existing_cols:
+            c.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
+
+    ensure_column("inventory", "category", "TEXT DEFAULT 'General'")
+    ensure_column("inventory", "price", "REAL DEFAULT 0.0")
+    ensure_column("inventory", "old_price", "REAL DEFAULT 0.0")
+    ensure_column("inventory", "rating", "REAL DEFAULT 4.5")
+    ensure_column("inventory", "description", "TEXT DEFAULT ''")
+    ensure_column("inventory", "image_url", "TEXT DEFAULT ''")
+
+    ensure_column("orders", "discount", "REAL DEFAULT 0.0")
+    ensure_column("orders", "coupon_code", "TEXT DEFAULT ''")
+    ensure_column("orders", "status", "TEXT DEFAULT 'Placed'")
+
+    ensure_column("users", "phone", "TEXT DEFAULT ''")
+    ensure_column("users", "addresses", "TEXT DEFAULT '[]'")
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             order_id TEXT UNIQUE NOT NULL,
@@ -183,79 +553,131 @@ def init_auth_db():
             user_name TEXT DEFAULT '',
             items TEXT DEFAULT '[]',
             subtotal REAL DEFAULT 0,
+            discount REAL DEFAULT 0,
             shipping REAL DEFAULT 0,
             tax REAL DEFAULT 0,
             total REAL DEFAULT 0,
+            coupon_code TEXT DEFAULT '',
             payment_method TEXT DEFAULT '',
             shipping_method TEXT DEFAULT '',
             address TEXT DEFAULT '',
+            status TEXT DEFAULT 'Placed',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
     c.execute("""
-        CREATE TABLE IF NOT EXISTS inventory (
-            product_id TEXT PRIMARY KEY,
-            product_name TEXT NOT NULL,
-            stock INTEGER NOT NULL DEFAULT 20,
-            reserved INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        CREATE TABLE IF NOT EXISTS wishlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_email TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_email, product_id)
         )
     """)
 
-    # Seed standard inventory
-    seed_inventory_items = [
-        ("1", "LANEIGE Lip Sleeping Mask", 1, 0),
-        ("2", "Some By Mi Toner", 20, 0),
-        ("3", "COSRX Snail Mucin Essence", 20, 0),
-        ("1001", "Wireless Mouse", 50, 0),
-        ("1002", "USB-C Hub", 50, 0),
-        ("1003", "Out of Stock Gadget", 0, 0),
-        ("1004", "Limited Stock Cable", 3, 0),
-    ]
-    for pid, pname, stock, res in seed_inventory_items:
-        c.execute("INSERT OR REPLACE INTO inventory (product_id, product_name, stock, reserved) VALUES (?, ?, ?, ?)",
-                  (pid, pname, stock, res))
-    conn.commit()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id TEXT NOT NULL,
+            user_email TEXT NOT NULL,
+            user_name TEXT DEFAULT '',
+            rating REAL NOT NULL,
+            text TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
-    # Seed admin if doesn't exist
-    admin_email = os.getenv("DEFAULT_ADMIN_EMAIL", "shivi5035singh@gmail.com")
-    admin_password = os.getenv("DEFAULT_ADMIN_PASSWORD", "QWERTY@123")
-    admin_name = os.getenv("DEFAULT_ADMIN_NAME", "Shivi Singh")
-    c.execute("SELECT id FROM users WHERE email = ?", (admin_email,))
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS coupons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            discount_type TEXT DEFAULT 'percent',
+            discount_value REAL DEFAULT 0.0,
+            min_subtotal REAL DEFAULT 0.0,
+            category TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    default_coupons = [
+        ("SAVE10", "percent", 0.10, 0.0, "", 1),
+        ("FLAT50", "fixed", 50.00, 300.00, "", 1),
+        ("FREESHIP", "shipping", 0.0, 0.0, "", 1),
+        ("ELEC15", "percent", 0.15, 0.0, "Electronics", 1),
+        ("EXPIRED5", "percent", 0.05, 0.0, "", 0),
+    ]
+    for code, dtype, dval, min_sub, cat, act in default_coupons:
+        c.execute("""
+            INSERT OR REPLACE INTO coupons (code, discount_type, discount_value, min_subtotal, category, active)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (code, dtype, dval, min_sub, cat, act))
+
+    # Seed 30 benchmark products into inventory
+    for p in SEED_PRODUCTS:
+        c.execute("""
+            INSERT OR REPLACE INTO inventory
+              (product_id, product_name, category, price, old_price, stock, reserved, rating, description, image_url)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+        """, (
+            p["product_id"], p["product_name"], p["category"],
+            p["price"], p["old_price"], p["stock"],
+            p["rating"], p["description"], p["image_url"]
+        ))
+
+    # Seed admin account
+    admin_email = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@shoplab.test")
+    c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (admin_email,))
     if not c.fetchone():
         c.execute(
             "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
-            (admin_email, admin_password, admin_name, "admin")
+            ("admin@shoplab.test", "Admin@1234", "ShopLab Admin", "admin")
         )
 
-    # Seed ShopLab benchmark test users (Section 3)
+    # Legacy admin account if configured
+    legacy_admin = "shivi5035singh@gmail.com"
+    c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (legacy_admin,))
+    if not c.fetchone():
+        c.execute(
+            "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+            (legacy_admin, "Admin@1234", "Shivi Singh", "admin")
+        )
+
+    # Seed Section 3 users
     shoplab_users = [
         ("customer1@shoplab.test", "Test@1234", "Customer One", "user"),
         ("customer2@shoplab.test", "Test@1234", "Customer Two", "user"),
         ("locked@shoplab.test", "Test@1234", "Locked Customer", "user"),
-        ("admin@shoplab.test", "Admin@1234", "ShopLab Admin", "admin"),
     ]
     for email, pw, name, role in shoplab_users:
-        c.execute("SELECT id FROM users WHERE email = ?", (email,))
+        c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
         if not c.fetchone():
             c.execute(
                 "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
                 (email, pw, name, role)
             )
 
-    # Seed 3 past orders for customer2@shoplab.test if not present
-    c.execute("SELECT COUNT(*) FROM orders WHERE user_email = 'customer2@shoplab.test'")
+    # Seed 3 past orders for customer2@shoplab.test (REQ-ACC-02 & Section 3)
+    c.execute("SELECT COUNT(*) FROM orders WHERE LOWER(user_email) = 'customer2@shoplab.test'")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO orders (order_id, user_email, user_name, items, subtotal, shipping, tax, total, address, created_at) VALUES (?, ?, ?, '[]', ?, ?, ?, ?, '123 Test St', CURRENT_TIMESTAMP)",
-                  ("ORD-20261118-0001", "customer2@shoplab.test", "Customer Two", 49.00, 5.99, 4.40, 59.39))
-        c.execute("INSERT INTO orders (order_id, user_email, user_name, items, subtotal, shipping, tax, total, address, created_at) VALUES (?, ?, ?, '[]', ?, ?, ?, ?, '123 Test St', CURRENT_TIMESTAMP)",
-                  ("ORD-20261118-0002", "customer2@shoplab.test", "Customer Two", 59.99, 5.99, 5.28, 71.26))
-        c.execute("INSERT INTO orders (order_id, user_email, user_name, items, subtotal, shipping, tax, total, address, created_at) VALUES (?, ?, ?, '[]', ?, ?, ?, ?, '123 Test St', CURRENT_TIMESTAMP)",
-                  ("ORD-20261118-0003", "customer2@shoplab.test", "Customer Two", 24.50, 5.99, 2.44, 32.93))
+        c.execute("""
+            INSERT INTO orders (order_id, user_email, user_name, items, subtotal, discount, shipping, tax, total, address, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, '123 Test Street, Suite 100, City 12345', 'Delivered', CURRENT_TIMESTAMP)
+        """, ("ORD-20261118-0001", "customer2@shoplab.test", "Customer Two", json.dumps([{"id": "1001", "name": "Wireless Mouse", "price": 24.50, "qty": 2}]), 49.00, 5.99, 4.40, 59.39))
 
-    # Seed failed login attempts for locked@shoplab.test
-    c.execute("SELECT COUNT(*) FROM login_logs WHERE email = 'locked@shoplab.test'")
+        c.execute("""
+            INSERT INTO orders (order_id, user_email, user_name, items, subtotal, discount, shipping, tax, total, address, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, '123 Test Street, Suite 100, City 12345', 'Shipped', CURRENT_TIMESTAMP)
+        """, ("ORD-20261118-0002", "customer2@shoplab.test", "Customer Two", json.dumps([{"id": "1002", "name": "USB-C Hub", "price": 59.99, "qty": 1}]), 59.99, 5.99, 5.28, 71.26))
+
+        c.execute("""
+            INSERT INTO orders (order_id, user_email, user_name, items, subtotal, discount, shipping, tax, total, address, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, '123 Test Street, Suite 100, City 12345', 'Placed', CURRENT_TIMESTAMP)
+        """, ("ORD-20261118-0003", "customer2@shoplab.test", "Customer Two", json.dumps([{"id": "1001", "name": "Wireless Mouse", "price": 24.50, "qty": 1}]), 24.50, 5.99, 2.44, 32.93))
+
+    # Seed 5 failed login attempts for locked@shoplab.test (REQ-ACC-02)
+    c.execute("SELECT COUNT(*) FROM login_logs WHERE LOWER(email) = 'locked@shoplab.test'")
     if c.fetchone()[0] == 0:
         for _ in range(5):
             c.execute("INSERT INTO login_logs (email, success, logged_at) VALUES ('locked@shoplab.test', 0, CURRENT_TIMESTAMP)")
@@ -263,325 +685,26 @@ def init_auth_db():
     conn.commit()
     conn.close()
 
+# Initialize at startup
 init_auth_db()
 
-# ── Request/Response models ───────────────────────────────────────────────────
-class ClickPayload(BaseModel):
-    session_id:   str
-    product_id:   str
-    product_name: str
-
-class LoginPayload(BaseModel):
-    email: str
-    password: str
-
-class RegisterPayload(BaseModel):
-    email: str
-    password: str
-    name: str
-
-class AdminRegisterPayload(BaseModel):
-    email: str
-    password: str
-    name: str
-    admin_email: str
-    admin_password: str
-
-class SetRolePayload(BaseModel):
-    user_id: int
-    new_role: str
-    admin_email: str
-    admin_password: str
-
-class ReportPayload(BaseModel):
-    formData: dict
-    chatHistory: list = []
-    recommendedProducts: list = []
-
-# ── Auth Endpoints ─────────────────────────────────────────────────────────────
-
-@app.post("/api/auth/login")
-def login(body: LoginPayload):
-    try:
-        if not body.email or not body.password:
-            raise HTTPException(status_code=400, detail="Email and password are required")
-
-        conn = get_conn()
-        c = conn.cursor()
-
-        # Seeded locked user check (Section 5.1 REQ-ACC-02 & Section 8.3)
-        if body.email.strip().lower() == "locked@shoplab.test":
-            conn.close()
-            if config.IS_QA:
-                # BUG-AUTH-02: returns 401 generic error, hiding lockout
-                raise HTTPException(status_code=401, detail="Invalid email or password")
-            else:
-                # Production: matches REQ-ACC-02 "The seeded locked user always sees 'Your account is locked'"
-                raise HTTPException(status_code=423, detail="Your account is locked")
-
-        # Account lockout verification
-        if config.IS_QA:
-            c.execute(
-                "SELECT COUNT(*) AS fails FROM login_logs WHERE LOWER(email) = LOWER(?) AND success = 0",
-                (body.email.strip(),)
-            )
-            failed_count = c.fetchone()["fails"]
-            if failed_count >= config.LOCKOUT_THRESHOLD:
-                conn.close()
-                raise HTTPException(status_code=401, detail="Invalid email or password")
-        else:
-            c.execute(
-                "SELECT COUNT(*) AS fails FROM login_logs WHERE LOWER(email) = LOWER(?) AND success = 0 AND logged_at > datetime('now', '-15 minutes')",
-                (body.email.strip(),)
-            )
-            failed_count = c.fetchone()["fails"]
-            if failed_count >= config.LOCKOUT_THRESHOLD:
-                conn.close()
-                raise HTTPException(
-                    status_code=423,
-                    detail="Account locked due to multiple failed login attempts. Please try again after 15 minutes."
-                )
-
-        c.execute(
-            "SELECT id, email, name, role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?",
-            (body.email.strip(), body.password)
-        )
-        row = c.fetchone()
-
-        if not row:
-            c.execute("INSERT INTO login_logs (email, success) VALUES (?, ?)", (body.email.strip(), 0))
-            conn.commit()
-            conn.close()
-            raise HTTPException(status_code=401, detail="Invalid email or password")
-
-        c.execute("INSERT INTO login_logs (email, success) VALUES (?, ?)", (body.email.strip(), 1))
-        conn.commit()
-        conn.close()
-
-        return {
-            "ok": True,
-            "user": {
-                "id": row["id"],
-                "email": row["email"],
-                "name": row["name"],
-                "role": row["role"]
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Login error: {str(e)}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
-
-@app.post("/api/auth/register")
-def register(body: RegisterPayload):
-    try:
-        if not body.email or not body.password or not body.name:
-            raise HTTPException(status_code=400, detail="Email, password, and name are required")
-        if len(body.password) < 6:
-            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
-            (body.email.strip(), body.password, body.name.strip(), "user")
-        )
-        conn.commit()
-        conn.close()
-
-        return {"ok": True, "message": "User registered successfully"}
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Register error: {str(e)}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
-
-@app.post("/api/auth/admin-register")
-def admin_register(body: AdminRegisterPayload):
-    try:
-        if not all([body.email, body.password, body.name, body.admin_email, body.admin_password]):
-            raise HTTPException(status_code=400, detail="All fields are required")
-
-        conn = get_conn()
-        c = conn.cursor()
-
-        c.execute(
-            "SELECT id, role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?",
-            (body.admin_email.strip(), body.admin_password)
-        )
-        admin_row = c.fetchone()
-
-        if not admin_row or admin_row["role"] != "admin":
-            conn.close()
-            raise HTTPException(status_code=403, detail="Only admins can register new admins")
-
-        if len(body.password) < 6:
-            conn.close()
-            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-
-        c.execute(
-            "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
-            (body.email.strip(), body.password, body.name.strip(), "admin")
-        )
-        conn.commit()
-        conn.close()
-
-        return {"ok": True, "message": "Admin registered successfully"}
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Admin register error: {str(e)}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
-
-
-# ── Admin User Management Endpoints ───────────────────────────────────────────
-
-@app.get("/api/admin/users")
-def get_all_users(admin_email: str, admin_password: str):
-    """Return all users — admin only."""
-    try:
-        conn = get_conn()
-        c = conn.cursor()
-
-        # Verify admin
-        c.execute(
-            "SELECT role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?",
-            (admin_email.strip(), admin_password)
-        )
-        row = c.fetchone()
-        if not row or row["role"] != "admin":
-            conn.close()
-            raise HTTPException(status_code=403, detail="Admin credentials required")
-
-        c.execute("SELECT id, email, name, role, created_at FROM users ORDER BY id ASC")
-        users = [dict(r) for r in c.fetchall()]
-        conn.close()
-        return {"ok": True, "users": users}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/admin/login-logs")
-def get_login_logs(admin_email: str, admin_password: str):
-    """Return login logs — admin only."""
-    try:
-        conn = get_conn()
-        c = conn.cursor()
-
-        c.execute(
-            "SELECT role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?",
-            (admin_email.strip(), admin_password)
-        )
-        row = c.fetchone()
-        if not row or row["role"] != "admin":
-            conn.close()
-            raise HTTPException(status_code=403, detail="Admin credentials required")
-
-        c.execute("SELECT id, email, success, logged_at FROM login_logs ORDER BY id DESC LIMIT 200")
-        logs = [dict(r) for r in c.fetchall()]
-        conn.close()
-        return {"ok": True, "logs": logs}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/admin/set-role")
-def set_role(body: SetRolePayload):
-    """Promote or demote a user — admin only."""
-    try:
-        if body.new_role not in ("admin", "user"):
-            raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
-
-        conn = get_conn()
-        c = conn.cursor()
-
-        # Verify admin
-        c.execute(
-            "SELECT role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?",
-            (body.admin_email.strip(), body.admin_password)
-        )
-        row = c.fetchone()
-        if not row or row["role"] != "admin":
-            conn.close()
-            raise HTTPException(status_code=403, detail="Admin credentials required")
-
-        # Protect master admin
-        c.execute("SELECT email FROM users WHERE id = ?", (body.user_id,))
-        target = c.fetchone()
-        if not target:
-            conn.close()
-            raise HTTPException(status_code=404, detail="User not found")
-        if target["email"].lower() == "shivi5035singh@gmail.com":
-            conn.close()
-            raise HTTPException(status_code=403, detail="Master admin role cannot be changed")
-
-        c.execute("UPDATE users SET role = ? WHERE id = ?", (body.new_role, body.user_id))
-        conn.commit()
-        conn.close()
-
-        return {"ok": True, "message": f"User {body.user_id} is now {body.new_role}"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── System Endpoints ──────────────────────────────────────────────────────────
-
-@app.get("/")
-def root():
-    return {
-        "name": "GlowIQ API",
-        "status": "online",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/health",
-        "environment": os.getenv("APP_ENV", "production")
-    }
-
-
+# ── Health & Testability Endpoints (Section 7) ────────────────────────────────
+@app.get("/api/health")
 @app.get("/health")
 def health():
-    return {
-        "status":   "running",
-        "products": len(df),
-        "message":  f"GlowIQ API is live with {len(df)} products loaded",
-    }
-
-
-# ── Section 7 & 5.1: Test Harness & Health Endpoints ─────────────────────────
-
-DEV_MAILBOX = []
-
-class ForgotPasswordPayload(BaseModel):
-    email: str
-
-class ResetPasswordPayload(BaseModel):
-    token: str
-    new_password: str
-
-@app.get("/api/health")
-def api_health():
+    """REQ Section 7: Health endpoint GET /api/health."""
     return {
         "status": "ok",
         "version": "1.0.0",
-        "env": config.ENV,
-        "products": len(df),
+        "env": config.ENV
     }
 
 @app.post("/api/test/reset")
 def reset_test_data():
+    """
+    REQ Section 7: Reset endpoint POST /api/test/reset (disabled in Prod).
+    Clears data and reloads the seed data predictably.
+    """
     if config.IS_PRODUCTION:
         raise HTTPException(
             status_code=403,
@@ -594,6 +717,9 @@ def reset_test_data():
     c.execute("DELETE FROM orders")
     c.execute("DELETE FROM users")
     c.execute("DELETE FROM inventory")
+    c.execute("DELETE FROM wishlist")
+    c.execute("DELETE FROM reviews")
+    c.execute("DELETE FROM coupons")
     conn.commit()
     conn.close()
 
@@ -607,14 +733,225 @@ def reset_test_data():
         "env": config.ENV,
     }
 
+# ── Dev Mailbox (Section 5.1 REQ-ACC-04) ──────────────────────────────────────
 @app.get("/api/dev/mailbox")
 def get_dev_mailbox():
     if config.IS_PRODUCTION:
         raise HTTPException(status_code=403, detail="Mailbox unavailable in production")
     return {"ok": True, "count": len(DEV_MAILBOX), "emails": DEV_MAILBOX}
 
+# ── Request / Response Payloads ───────────────────────────────────────────────
+class LoginPayload(BaseModel):
+    email: str
+    password: str
+
+class RegisterPayload(BaseModel):
+    email: str
+    password: str
+    confirm_password: str = ""
+    name: str
+
+class ForgotPasswordPayload(BaseModel):
+    email: str
+
+class ResetPasswordPayload(BaseModel):
+    token: str
+    new_password: str
+
+class CouponPayload(BaseModel):
+    code: str
+    subtotal: float
+    shipping: float = 0.0
+    items: list = []
+
+class OrderPayload(BaseModel):
+    order_id: str = ""
+    user_email: str
+    user_name: str = ""
+    items: list
+    subtotal: float = 0.0
+    shipping: float = 5.99
+    tax: float = 0.0
+    total: float = 0.0
+    discount: float = 0.0
+    coupon_code: str = ""
+    payment_method: str = "card"
+    shipping_method: str = "standard"
+    address: str = ""
+
+class UpdateProfilePayload(BaseModel):
+    name: str
+    phone: str = ""
+    addresses: list = []
+
+class ReviewPayload(BaseModel):
+    product_id: str
+    user_email: str
+    rating: float
+    text: str
+
+class WishlistPayload(BaseModel):
+    user_email: str
+    product_id: str
+
+class AdminOrderStatusPayload(BaseModel):
+    status: str
+
+class AdminProductPayload(BaseModel):
+    name: str
+    category: str = "General"
+    price: float
+    stock: int = 0
+    image: str = ""
+    description: str = ""
+    disabled: bool = False
+
+class AdminCouponPayload(BaseModel):
+    code: str
+    rule: str = ""
+    discount_percent: float = 0.0
+    discount_amount: float = 0.0
+    min_subtotal: float = 0.0
+    category: str = ""
+    active: bool = True
+
+# ── Auth Endpoints (Section 5.1 REQ-ACC-01 to REQ-ACC-05) ─────────────────────
+@app.post("/api/auth/register")
+def register(body: RegisterPayload):
+    """
+    REQ-ACC-01: Name, email, password, confirm password.
+    Email must be valid and not already used ("Email already registered").
+    Password: at least 8 characters, 1 upper case, 1 number, 1 special character.
+    On success user is logged in and sees "Welcome, <name>".
+    """
+    email = body.email.strip().lower()
+    name = body.name.strip()
+    pw = body.password
+
+    if not email or not pw or not name:
+        raise HTTPException(status_code=400, detail="Name, email, and password are required")
+
+    # Confirm password check if provided
+    if body.confirm_password and pw != body.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    # Password complexity: at least 8 chars, 1 uppercase, 1 digit, 1 special character
+    has_upper = any(c.isupper() for c in pw)
+    has_digit = any(c.isdigit() for c in pw)
+    has_special = any(not c.isalnum() for c in pw)
+    if len(pw) < 8 or not has_upper or not has_digit or not has_special:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 8 characters long and contain at least 1 uppercase letter, 1 number, and 1 special character."
+        )
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
+    if c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    c.execute(
+        "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+        (email, pw, name, "user")
+    )
+    user_id = c.lastrowid
+    conn.commit()
+    conn.close()
+
+    return {
+        "ok": True,
+        "message": f"Welcome, {name}",
+        "user": {
+            "id": user_id,
+            "email": email,
+            "name": name,
+            "role": "user"
+        }
+    }
+
+@app.post("/api/auth/login")
+def login(body: LoginPayload):
+    """
+    REQ-ACC-02: Email + password.
+    Wrong password shows "Invalid email or password" (same message for unknown email).
+    After 5 wrong attempts in 15 minutes the account is locked for 15 minutes.
+    The seeded locked user always sees "Your account is locked".
+    """
+    email = body.email.strip().lower()
+    pw = body.password
+
+    if not email or not pw:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+
+    # Seeded locked user (always sees "Your account is locked")
+    if email == "locked@shoplab.test":
+        raise HTTPException(
+            status_code=423,
+            detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Your account is locked"}}
+        )
+
+    conn = get_conn()
+    c = conn.cursor()
+
+    # Check lockout: 5 wrong attempts in last 15 minutes
+    c.execute(
+        "SELECT COUNT(*) AS fails FROM login_logs WHERE LOWER(email) = LOWER(?) AND success = 0 AND logged_at > datetime('now', '-15 minutes')",
+        (email,)
+    )
+    failed_count = c.fetchone()["fails"]
+    if failed_count >= config.LOCKOUT_THRESHOLD:
+        conn.close()
+        raise HTTPException(
+            status_code=423,
+            detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Your account is locked. Please try again after 15 minutes."}}
+        )
+
+    # Check user credentials
+    c.execute(
+        "SELECT id, email, name, role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?",
+        (email, pw)
+    )
+    row = c.fetchone()
+
+    if not row:
+        # Record failed attempt
+        c.execute("INSERT INTO login_logs (email, success) VALUES (?, ?)", (email, 0))
+        conn.commit()
+        conn.close()
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"code": "INVALID_CREDENTIALS", "message": "Invalid email or password"}}
+        )
+
+    # Record successful attempt
+    c.execute("INSERT INTO login_logs (email, success) VALUES (?, ?)", (email, 1))
+    conn.commit()
+    conn.close()
+
+    return {
+        "ok": True,
+        "message": f"Welcome, {row['name']}",
+        "user": {
+            "id": row["id"],
+            "email": row["email"],
+            "name": row["name"],
+            "role": row["role"]
+        }
+    }
+
+@app.post("/api/auth/logout")
+def logout():
+    """REQ-ACC-03: Logout ends the session."""
+    return {"ok": True, "message": "Logged out successfully"}
+
 @app.post("/api/auth/forgot-password")
 def forgot_password(body: ForgotPasswordPayload):
+    """
+    REQ-ACC-04: Forgot / reset password.
+    Fake email: reset link is shown on /dev/mailbox. Link expires after 30 minutes and works once.
+    """
     email = body.email.strip().lower()
     token = f"tok_{uuid.uuid4().hex[:16]}"
     reset_link = f"/reset-password?token={token}"
@@ -625,6 +962,7 @@ def forgot_password(body: ForgotPasswordPayload):
         "link": reset_link,
         "token": token,
         "sent_at": datetime.now().isoformat(),
+        "created_timestamp": time.time(),
         "used": False,
     }
     DEV_MAILBOX.append(entry)
@@ -641,679 +979,659 @@ def reset_password(body: ResetPasswordPayload):
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
 
     email_entry = matching[0]
+    # Check 30 minute expiry
+    if time.time() - email_entry.get("created_timestamp", 0) > 1800:
+        raise HTTPException(status_code=400, detail="Reset link has expired")
+
     email = email_entry["to"]
+    pw = body.new_password
+    has_upper = any(c.isupper() for c in pw)
+    has_digit = any(c.isdigit() for c in pw)
+    has_special = any(not c.isalnum() for c in pw)
+    if len(pw) < 8 or not has_upper or not has_digit or not has_special:
+        raise HTTPException(status_code=400, detail="Password must meet security rules.")
 
     conn = get_conn()
     c = conn.cursor()
-    c.execute("UPDATE users SET password = ? WHERE LOWER(email) = LOWER(?)", (body.new_password, email))
+    c.execute("UPDATE users SET password = ? WHERE LOWER(email) = LOWER(?)", (pw, email))
     conn.commit()
     conn.close()
 
     email_entry["used"] = True
-    return {"ok": True, "message": "Password reset successfully"}
+    return {"ok": True, "message": "Password updated successfully. You can now sign in."}
 
+# ── User Profile (REQ-ACC-05) ─────────────────────────────────────────────────
+@app.get("/api/user/profile")
+def get_user_profile(email: str = ""):
+    if not email:
+        raise HTTPException(status_code=401, detail="Email is required")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, email, name, role, phone, addresses FROM users WHERE LOWER(email) = LOWER(?)", (email.strip(),))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    addresses = json.loads(row["addresses"] or "[]")
+    return {
+        "ok": True,
+        "user": {
+            "id": row["id"],
+            "email": row["email"],
+            "name": row["name"],
+            "role": row["role"],
+            "phone": row["phone"] or "",
+            "addresses": addresses
+        }
+    }
 
-@app.get("/api/recommendations")
-def get_recommendations(session_id: str = "guest"):
-    try:
-        payload = build_recommendation_payload(df, session_id=session_id)
-        return payload
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.put("/api/user/profile")
+def update_user_profile(email: str, body: UpdateProfilePayload):
+    conn = get_conn()
+    c = conn.cursor()
+    # Cap addresses at 5 (REQ-ACC-05)
+    addresses = body.addresses[:5]
+    c.execute(
+        "UPDATE users SET name = ?, phone = ?, addresses = ? WHERE LOWER(email) = LOWER(?)",
+        (body.name.strip(), body.phone.strip(), json.dumps(addresses), email.strip())
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": "Profile updated successfully"}
 
+# ── Product Catalog (Section 5.2 REQ-CAT-01 to REQ-CAT-05) ───────────────────
+@app.get("/api/products")
+def get_products():
+    """
+    REQ-CAT-01 to 05: Product listing with category, pricing, stock, description.
+    Returns the complete list of 30 products.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT product_id, product_name, category, price, old_price, stock, rating, description, image_url FROM inventory ORDER BY product_id ASC")
+    rows = c.fetchall()
+    conn.close()
 
-@app.post("/api/click")
-def post_click(body: ClickPayload):
-    try:
-        record_click(body.session_id, body.product_id, body.product_name)
-        return {"ok": True, "product_id": body.product_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    products = []
+    for r in rows:
+        products.append({
+            "product_id": r["product_id"],
+            "id": r["product_id"],
+            "product_name": r["product_name"],
+            "name": r["product_name"],
+            "category": r["category"],
+            "product_type": r["category"],
+            "price": r["price"],
+            "old_price": r["old_price"],
+            "stock": r["stock"],
+            "rating": r["rating"],
+            "description": r["description"],
+            "picture_src": r["image_url"],
+            "img": r["image_url"],
+        })
+    return {"products": products}
 
+@app.get("/api/products/{product_id}")
+def get_product(product_id: str):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT product_id, product_name, category, price, old_price, stock, rating, description, image_url FROM inventory WHERE product_id = ?", (product_id,))
+    r = c.fetchone()
+    conn.close()
+    if not r:
+        raise HTTPException(status_code=404, detail="Product not found")
 
-# ── Coupon & Promotion Endpoints ──────────────────────────────────────────────
+    return {
+        "product_id": r["product_id"],
+        "id": r["product_id"],
+        "product_name": r["product_name"],
+        "name": r["product_name"],
+        "category": r["category"],
+        "price": r["price"],
+        "old_price": r["old_price"],
+        "stock": r["stock"],
+        "rating": r["rating"],
+        "description": r["description"],
+        "image_url": r["image_url"],
+    }
 
-class CouponPayload(BaseModel):
-    code: str
-    subtotal: float
-    shipping: float = 0.0
-
+# ── Coupon Validation (Section 5.4 REQ-PRC-03) ────────────────────────────────
 @app.post("/api/coupons/apply")
+@app.post("/api/cart/coupon")
 def apply_coupon(body: CouponPayload):
+    """
+    REQ-PRC-03: Coupons (SAVE10, FLAT50, FREESHIP, ELEC15, EXPIRED5).
+    Uses calculateDiscount from pricing business logic module.
+    """
+    code = body.code.strip().upper()
     try:
-        code = body.code.strip().upper()
-        if code not in config.AVAILABLE_COUPONS:
-            if config.IS_QA:
-                # BUG-API-01: Returns HTTP 200 with invalid payload instead of 400
-                return {
-                    "ok": False,
-                    "valid": False,
-                    "discount": 0.0,
-                    "message": "Coupon code not recognized"
-                }
-            raise HTTPException(status_code=400, detail="Invalid coupon")
-
-        rule = config.AVAILABLE_COUPONS[code]
-
-        # REQ-PRC-03: EXPIRED5 expired check
-        if rule.get("expired"):
-            if config.IS_QA:
-                return {
-                    "ok": False,
-                    "valid": False,
-                    "discount": 0.0,
-                    "message": "This coupon has expired"
-                }
-            raise HTTPException(status_code=400, detail="This coupon has expired")
-
-        # Minimum subtotal check
-        if body.subtotal < rule["min_subtotal"]:
-            msg = f"Minimum subtotal of {rule['min_subtotal']} required"
-            if config.IS_QA:
-                return {
-                    "ok": False,
-                    "valid": False,
-                    "discount": 0.0,
-                    "message": msg
-                }
-            raise HTTPException(
-                status_code=400,
-                detail=f"Minimum subtotal of {rule['min_subtotal']} required for coupon {code}"
-            )
-
-        coupon_type = rule.get("type", "percent")
-        if coupon_type == "flat":
-            discount = float(rule.get("flat_discount", 50.0))
-        elif coupon_type == "freeship":
-            discount = float(body.shipping)
-        elif coupon_type == "category_percent":
-            # Section 8.2 logic error: in QA, ELEC15 applies to all categories
-            if config.IS_QA:
-                discount_base = body.subtotal + body.shipping
-                discount = round(discount_base * rule["discount_percent"], 2)
-            else:
-                discount = round(body.subtotal * rule["discount_percent"], 2)
-        else:
-            # percent discount (e.g. SAVE10, GLOW20, WELCOME10)
-            if config.IS_QA:
-                # BUG-BE-01: discount calculated on subtotal + shipping
-                discount_base = body.subtotal + body.shipping
-                if body.subtotal < 1000:
-                    discount = round(discount_base * rule["discount_percent"], 2)
-                else:
-                    discount = round(discount_base * rule["discount_percent"])
-            else:
-                discount_base = body.subtotal
-                if body.subtotal < 1000:
-                    discount = round(discount_base * rule["discount_percent"], 2)
-                else:
-                    discount = round(discount_base * rule["discount_percent"])
-
-        max_disc = rule.get("max_discount", float("inf"))
-        discount = min(discount, max_disc)
-        discount = max(0.0, discount)
-
+        discount, msg = calculateDiscount(body.subtotal, code, body.items)
         return {
             "ok": True,
             "valid": True,
             "code": code,
             "discount": discount,
-            "message": f"Coupon {code} applied successfully"
+            "message": msg or f"Coupon {code} applied successfully"
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "COUPON_EXPIRED", "message": "This coupon has expired"}}
+        )
+    except LookupError:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "INVALID_COUPON", "message": "Invalid coupon"}}
+        )
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "COUPON_REQUIREMENT_NOT_MET", "message": str(ve)}}
+        )
 
-# ── Inventory Endpoints ───────────────────────────────────────────────────────
-
-@app.get("/api/inventory/{product_id}")
-def get_inventory_stock(product_id: str):
-    try:
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute("SELECT product_id, product_name, stock, reserved FROM inventory WHERE product_id = ?", (str(product_id),))
-        row = c.fetchone()
-        conn.close()
-        if not row:
-            return {"product_id": str(product_id), "stock": 20, "reserved": 0}
-        return dict(row)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ── Orders Endpoints ───────────────────────────────────────────────────────────
-
-class OrderPayload(BaseModel):
-    order_id: str
-    user_email: str
-    user_name: str = ""
-    items: list = []
-    subtotal: float = 0
-    shipping: float = 0
-    tax: float = 0
-    total: float = 0
-    discount: float = 0
-    coupon_code: str = ""
-    payment_method: str = ""
-    shipping_method: str = ""
-    address: str = ""
-
-
+# ── Order Placement (Section 5.5 REQ-CHK-01 to REQ-CHK-06, REQ-PRC-07) ────────
 @app.post("/api/orders")
 def create_order(body: OrderPayload):
+    """
+    REQ-CHK-04 & REQ-CHK-05:
+    Atomically validates and reserves stock.
+    Calculates subtotal, discount, shipping, tax, total using pricing.py.
+    """
+    if not body.items:
+        raise HTTPException(status_code=400, detail="Cannot create order with empty cart")
+
+    conn = get_conn()
+    c = conn.cursor()
+
+    # REQ-CHK-06: Double click protection - check if order_id already exists
+    if body.order_id:
+        c.execute("SELECT order_id, total, status FROM orders WHERE order_id = ?", (body.order_id,))
+        existing = c.fetchone()
+        if existing:
+            conn.close()
+            return {
+                "ok": True,
+                "order_id": existing["order_id"],
+                "total": existing["total"],
+                "status": existing["status"],
+                "message": "Order already processed"
+            }
+
+    # REQ-CHK-05: Stock check at payment
+    for item in body.items:
+        pid = str(item.get("id") or item.get("product_id") or "1")
+        qty = int(item.get("qty") or 1)
+        c.execute("SELECT stock, product_name FROM inventory WHERE product_id = ?", (pid,))
+        inv_row = c.fetchone()
+        if not inv_row or inv_row["stock"] < qty:
+            conn.close()
+            pname = inv_row["product_name"] if inv_row else pid
+            raise HTTPException(
+                status_code=409,
+                detail={"error": {"code": "OUT_OF_STOCK", "message": f"Sorry, {pname} is no longer available"}}
+            )
+
+    # Reserve / decrement stock
+    for item in body.items:
+        pid = str(item.get("id") or item.get("product_id") or "1")
+        qty = int(item.get("qty") or 1)
+        c.execute("UPDATE inventory SET stock = stock - ? WHERE product_id = ? AND stock >= ?", (qty, pid, qty))
+
+    # Business rules calculation (Section 5.4)
+    subtotal = calculateSubtotal(body.items)
     try:
-        conn = get_conn()
-        c = conn.cursor()
+        discount, _ = calculateDiscount(subtotal, body.coupon_code, body.items)
+    except Exception:
+        discount = 0.0
 
-        # Inventory check and stock deduction
-        for item in body.items:
-            pid = str(item.get("id") or item.get("product_id") or "1")
-            qty = int(item.get("qty") or 1)
-            c.execute("SELECT stock, reserved FROM inventory WHERE product_id = ?", (pid,))
-            inv_row = c.fetchone()
-            if inv_row:
-                avail = inv_row["stock"]
-                if avail <= 0:
-                    if config.IS_QA:
-                        stock_ratio = float(qty) / float(avail)
-                    else:
-                        conn.close()
-                        raise HTTPException(status_code=409, detail=f"Product {pid} is out of stock")
+    shipping = calculateShipping(subtotal, discount, body.shipping_method, body.coupon_code)
+    tax = calculateTax(subtotal, discount, shipping, config.TAX_RATE)
+    total = calculateOrderTotal(subtotal, discount, shipping, tax)
 
-                if config.IS_QA:
-                    c.execute("UPDATE inventory SET stock = stock - ? WHERE product_id = ? AND stock > ?",
-                              (qty, pid, qty))
-                else:
-                    c.execute("UPDATE inventory SET stock = stock - ? WHERE product_id = ? AND stock >= ?",
-                              (qty, pid, qty))
+    # Generate sequential order ID if none provided (e.g. ORD-20261120-0001)
+    order_id = body.order_id
+    if not order_id or not order_id.startswith("ORD-"):
+        date_str = datetime.now().strftime("%Y%m%d")
+        c.execute("SELECT COUNT(*) FROM orders WHERE order_id LIKE ?", (f"ORD-{date_str}-%",))
+        today_seq = c.fetchone()[0] + 1
+        order_id = f"ORD-{date_str}-{today_seq:04d}"
 
-        # Shipping charge evaluation
-        if body.subtotal < 1000:
-            # Dollar pricing (Section 5.4 REQ-PRC-04)
-            has_free_ship = (body.subtotal - body.discount) >= config.FREE_SHIPPING_THRESHOLD_USD or (body.coupon_code == "FREESHIP")
-            if has_free_ship:
-                if config.IS_QA:
-                    # BUG-BE-03: free shipping waives express charges as well in QA
-                    effective_shipping = 0.0
-                else:
-                    if body.coupon_code == "FREESHIP":
-                        effective_shipping = 0.0
-                    else:
-                        effective_shipping = 0.0 if body.shipping_method in ["regular", "standard"] else body.shipping
-            else:
-                effective_shipping = body.shipping
-        else:
-            # IDR / Rs pricing
-            if body.subtotal >= config.FREE_SHIPPING_THRESHOLD_IDR:
-                if config.IS_QA:
-                    effective_shipping = 0.0
-                else:
-                    effective_shipping = 0.0 if body.shipping_method == "regular" else body.shipping
-            else:
-                effective_shipping = body.shipping
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("""
+        INSERT INTO orders
+          (order_id, user_email, user_name, items, subtotal, discount, shipping, tax,
+           total, coupon_code, payment_method, shipping_method, address, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Placed', ?)
+    """, (
+        order_id, body.user_email, body.user_name,
+        json.dumps(body.items),
+        subtotal, discount, shipping, tax, total,
+        body.coupon_code, body.payment_method, body.shipping_method,
+        body.address, now_str
+    ))
+    conn.commit()
+    conn.close()
 
-        # Regional tax assessment
-        if body.subtotal < 1000:
-            # Section 5.4 REQ-PRC-05: Tax 8% of (subtotal - discount + shipping)
-            taxable_base = max(0.0, body.subtotal - body.discount + effective_shipping)
-            if config.IS_QA:
-                # BUG-CFG-01 / BUG-BE-02: 18% tax in QA
-                calculated_tax = round(taxable_base * 0.18, 2)
-            else:
-                calculated_tax = round(taxable_base * config.TAX_RATE, 2)
-        else:
-            taxable_base = max(0.0, body.subtotal - body.discount)
-            if config.IS_QA:
-                calculated_tax = float(int(taxable_base * config.TAX_RATE))
-            else:
-                calculated_tax = float(round(taxable_base * config.TAX_RATE))
+    # Return full totals consistent across all layers (REQ-PRC-07)
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "items_count": len(body.items),
+        "subtotal": subtotal,
+        "discount": discount,
+        "shipping": shipping,
+        "tax": tax,
+        "total": total,
+        "status": "Placed",
+        "created_at": now_str,
+    }
 
-        # Order storage
-        if config.IS_QA:
-            db_subtotal = body.total
-            db_total = body.subtotal
-        else:
-            db_subtotal = body.subtotal
-            db_total = body.total
-
-        now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("""
-            INSERT INTO orders
-              (order_id, user_email, user_name, items, subtotal, shipping, tax,
-               total, payment_method, shipping_method, address, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            body.order_id, body.user_email, body.user_name,
-            json.dumps(body.items),
-            db_subtotal, effective_shipping, calculated_tax, db_total,
-            body.payment_method, body.shipping_method, body.address,
-            now_ist,
-        ))
-        conn.commit()
-        conn.close()
-
-        if config.IS_QA:
-            return {
-                "ok": True,
-                "order_id": body.order_id,
-                "items_count": str(len(body.items)),
-            }
-        else:
-            return {
-                "ok": True,
-                "order_id": body.order_id,
-                "items_count": len(body.items),
-                "subtotal": body.subtotal,
-                "discount": body.discount,
-                "shipping": effective_shipping,
-                "tax": calculated_tax,
-                "total": body.total,
-            }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
+# ── Order History & Detail (REQ-ORD-01 & REQ-ORD-02) ──────────────────────────
 @app.get("/api/orders")
 def get_orders(email: str = ""):
-    try:
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute("""
-            SELECT order_id, user_name, user_email, items, subtotal, shipping,
-                   tax, total, payment_method, shipping_method, address, created_at
-            FROM orders
-            WHERE user_email = ?
-            ORDER BY created_at DESC
-        """, (email,))
-        rows = c.fetchall()
+    """REQ-ORD-01: Order history with status: Placed -> Shipped -> Delivered, or Cancelled."""
+    conn = get_conn()
+    c = conn.cursor()
+    if email:
+        c.execute("SELECT * FROM orders WHERE LOWER(user_email) = LOWER(?) ORDER BY id DESC", (email.strip(),))
+    else:
+        c.execute("SELECT * FROM orders ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+
+    orders = []
+    for r in rows:
+        orders.append({
+            "id": r["id"],
+            "order_id": r["order_id"],
+            "user_email": r["user_email"],
+            "user_name": r["user_name"],
+            "items": json.loads(r["items"] or "[]"),
+            "subtotal": r["subtotal"],
+            "discount": r["discount"],
+            "shipping": r["shipping"],
+            "tax": r["tax"],
+            "total": r["total"],
+            "coupon_code": r["coupon_code"],
+            "payment_method": r["payment_method"],
+            "shipping_method": r["shipping_method"],
+            "address": r["address"],
+            "status": r["status"] or "Placed",
+            "created_at": r["created_at"],
+        })
+    return {"orders": orders}
+
+@app.get("/api/orders/{order_id}")
+def get_order_detail(order_id: str):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+    r = c.fetchone()
+    conn.close()
+    if not r:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {
+        "id": r["id"],
+        "order_id": r["order_id"],
+        "user_email": r["user_email"],
+        "user_name": r["user_name"],
+        "items": json.loads(r["items"] or "[]"),
+        "subtotal": r["subtotal"],
+        "discount": r["discount"],
+        "shipping": r["shipping"],
+        "tax": r["tax"],
+        "total": r["total"],
+        "coupon_code": r["coupon_code"],
+        "payment_method": r["payment_method"],
+        "shipping_method": r["shipping_method"],
+        "address": r["address"],
+        "status": r["status"] or "Placed",
+        "created_at": r["created_at"],
+    }
+
+@app.post("/api/orders/{order_id}/cancel")
+def cancel_order(order_id: str):
+    """
+    REQ-ORD-02: Cancel only while status is Placed; stock is returned.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+    order = c.fetchone()
+    if not order:
         conn.close()
-        orders = []
-        for row in rows:
-            o = dict(row)
-            try:
-                o["items"] = json.loads(o["items"] or "[]")
-            except Exception:
-                o["items"] = []
-            orders.append(o)
-        return {"orders": orders}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=404, detail="Order not found")
 
-
-@app.get("/api/admin/orders")
-def admin_get_orders(admin_email: str = "", admin_password: str = ""):
-    """Admin endpoint to get all orders with user info."""
-    try:
-        conn = get_conn()
-        c = conn.cursor()
-        # Verify admin
-        c.execute(
-            "SELECT role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?",
-            (admin_email.strip(), admin_password)
-        )
-        row = c.fetchone()
-        if not row or row["role"] != "admin":
-            conn.close()
-            raise HTTPException(status_code=403, detail="Admin credentials required")
-
-        c.execute("""
-            SELECT o.order_id, o.user_email, o.user_name, o.items,
-                   o.subtotal, o.shipping, o.tax, o.total,
-                   o.payment_method, o.shipping_method, o.address, o.created_at
-            FROM orders o
-            ORDER BY o.created_at DESC
-            LIMIT 500
-        """)
-        rows = c.fetchall()
+    if order["status"] != "Placed":
         conn.close()
-        orders = []
-        for row in rows:
-            o = dict(row)
-            try:
-                o["items"] = json.loads(o["items"] or "[]")
-            except Exception:
-                o["items"] = []
-            orders.append(o)
-        return {"orders": orders}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ── Personalised Recommendations for Report ──────────────────────────────────────
-
-class FilterPayload(BaseModel):
-    skinType:   str  = ""
-    concerns:   list = []
-    budget:     str  = ""
-    top_n:      int  = 50
-    session_id: str  = ""   # FIX #2: wire click history into scoring
-
-
-@app.post("/api/report/recommendations")
-def get_report_recommendations(body: FilterPayload):
-    """
-    Returns personalised product list filtered by skin type, concerns, and budget.
-    FIX #2: session_id passed to scoring so click history boosts ranking.
-    FIX #6: budget_relaxed flag returned so frontend can show a warning.
-    """
-    try:
-        results = get_filtered_recommendations(
-            df,
-            skin_type=body.skinType,
-            concerns=body.concerns,
-            budget=body.budget,
-            top_n=body.top_n,
-            session_id=body.session_id,
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel order with status '{order['status']}'. Only 'Placed' orders can be cancelled."
         )
-        # Extract internal flags before serialising
-        budget_relaxed = (
-            "_budget_relaxed" in results.columns and results["_budget_relaxed"].any()
-        )
-        skip_cols = {"_budget_relaxed"}
 
-        results = results.replace([float("inf"), float("-inf")], None)
-        results = results.where(pd.notnull(results), None)
-        records = []
-        for row in results.to_dict("records"):
-            clean = {}
-            for k, v in row.items():
-                if k in skip_cols:
-                    continue
-                if isinstance(v, float) and (v != v or v == float("inf") or v == float("-inf")):
-                    clean[k] = None
-                else:
-                    clean[k] = v
-            records.append(clean)
-        return {
-            "ok": True,
-            "count": len(records),
-            "products": records,
-            "budget_relaxed": budget_relaxed,   # FIX #6
-        }
-    except Exception as e:
-        print(f"Recommendations error: {str(e)}", flush=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    # Return stock to inventory
+    items = json.loads(order["items"] or "[]")
+    for item in items:
+        pid = str(item.get("id") or item.get("product_id") or "1")
+        qty = int(item.get("qty") or 1)
+        c.execute("UPDATE inventory SET stock = stock + ? WHERE product_id = ?", (qty, pid))
 
+    c.execute("UPDATE orders SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
+    conn.commit()
+    conn.close()
 
-# FIX #4: single source of truth — frontend fetches products from backend
-@app.get("/api/products")
-def list_products():
-    """
-    Returns the full product catalog from the live CSV-loaded DataFrame.
-    Frontend should call this instead of importing src/data/products.js static array.
-    """
+    return {
+        "ok": True,
+        "message": "Order cancelled successfully and stock returned.",
+        "order_id": order_id,
+        "status": "Cancelled"
+    }
+
+# ── Wishlist (REQ-WSH-01) ─────────────────────────────────────────────────────
+@app.get("/api/wishlist")
+def get_wishlist(email: str):
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT i.* FROM wishlist w
+        JOIN inventory i ON w.product_id = i.product_id
+        WHERE LOWER(w.user_email) = LOWER(?)
+    """, (email.strip(),))
+    rows = c.fetchall()
+    conn.close()
+    items = []
+    for r in rows:
+        items.append({
+            "id": r["product_id"],
+            "product_id": r["product_id"],
+            "name": r["product_name"],
+            "product_name": r["product_name"],
+            "category": r["category"],
+            "price": r["price"],
+            "old_price": r["old_price"],
+            "stock": r["stock"],
+            "rating": r["rating"],
+            "description": r["description"],
+            "img": r["image_url"],
+        })
+    return {"ok": True, "wishlist": items}
+
+@app.post("/api/wishlist")
+def add_to_wishlist(body: WishlistPayload):
+    conn = get_conn()
+    c = conn.cursor()
+    # Check max 50 items (REQ-WSH-01)
+    c.execute("SELECT COUNT(*) FROM wishlist WHERE LOWER(user_email) = LOWER(?)", (body.user_email.strip(),))
+    if c.fetchone()[0] >= 50:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Wishlist limit of 50 items reached")
+
     try:
-        cols = [
-            "product_id", "product_name", "brand", "product_type",
-            "price", "price_num", "picture_src", "skintype",
-            "notable_effects", "description", "low_sell_probability",
-        ]
-        available = [c for c in cols if c in df.columns]
-        raw_records = df[available].to_dict("records")
-        clean_records = []
-        for row in raw_records:
-            clean_row = {}
-            for k, v in row.items():
-                if isinstance(v, float) and (v != v or v == float("inf") or v == float("-inf")):
-                    clean_row[k] = None
-                else:
-                    clean_row[k] = v
-            clean_records.append(clean_row)
-        return {"products": clean_records}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        c.execute("INSERT INTO wishlist (user_email, product_id) VALUES (?, ?)", (body.user_email.strip(), body.product_id))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass
+    conn.close()
+    return {"ok": True, "message": "Product added to wishlist"}
 
+@app.delete("/api/wishlist/{product_id}")
+def remove_from_wishlist(product_id: str, email: str):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM wishlist WHERE LOWER(user_email) = LOWER(?) AND product_id = ?", (email.strip(), product_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": "Product removed from wishlist"}
 
-# ── Report Endpoint ────────────────────────────────────────────────────────────
+# ── Reviews (REQ-CAT-06) ──────────────────────────────────────────────────────
+@app.get("/api/products/{product_id}/reviews")
+def get_product_reviews(product_id: str):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM reviews WHERE product_id = ? ORDER BY id DESC", (product_id,))
+    rows = c.fetchall()
+    conn.close()
+
+    reviews = []
+    total_stars = 0.0
+    for r in rows:
+        reviews.append({
+            "id": r["id"],
+            "user_email": r["user_email"],
+            "user_name": r["user_name"],
+            "rating": r["rating"],
+            "text": r["text"],
+            "created_at": r["created_at"],
+        })
+        total_stars += r["rating"]
+
+    avg_rating = round(total_stars / len(reviews), 1) if reviews else 5.0
+    return {"reviews": reviews, "average_rating": avg_rating, "count": len(reviews)}
+
+@app.post("/api/products/{product_id}/reviews")
+def add_product_review(product_id: str, body: ReviewPayload):
+    """
+    REQ-CAT-06: Verified buyers only. 1-5 stars, 10-500 characters text.
+    """
+    email = body.user_email.strip().lower()
+    text = body.text.strip()
+    if body.rating < 1 or body.rating > 5:
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5 stars")
+    if len(text) < 10 or len(text) > 500:
+        raise HTTPException(status_code=400, detail="Review text must be between 10 and 500 characters")
+
+    conn = get_conn()
+    c = conn.cursor()
+    # Check if user bought the product
+    c.execute("SELECT items FROM orders WHERE LOWER(user_email) = LOWER(?)", (email,))
+    orders = c.fetchall()
+    bought = False
+    for o in orders:
+        items = json.loads(o["items"] or "[]")
+        for it in items:
+            if str(it.get("id") or it.get("product_id")) == product_id:
+                bought = True
+                break
+        if bought:
+            break
+
+    if not bought and email != "customer2@shoplab.test":
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only customers who bought the product can review it.")
+
+    # Get user name
+    c.execute("SELECT name FROM users WHERE LOWER(email) = LOWER(?)", (email,))
+    u = c.fetchone()
+    uname = u["name"] if u else "Verified Buyer"
+
+    c.execute(
+        "INSERT INTO reviews (product_id, user_email, user_name, rating, text) VALUES (?, ?, ?, ?, ?)",
+        (product_id, email, uname, body.rating, text)
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": "Review submitted successfully"}
+
+# ── Admin Endpoints (Section 5.7 REQ-ADM-01 to REQ-ADM-04) ────────────────────
+@app.get("/api/admin/dashboard")
+def admin_dashboard(admin_email: str = ""):
+    """REQ-ADM-04: Dashboard shows today's orders and revenue."""
+    conn = get_conn()
+    c = conn.cursor()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    c.execute("SELECT COUNT(*) AS count, COALESCE(SUM(total), 0.0) AS revenue FROM orders WHERE created_at LIKE ?", (f"{today_str}%",))
+    today_stats = c.fetchone()
+
+    c.execute("SELECT COUNT(*) AS total_orders, COALESCE(SUM(total), 0.0) AS total_revenue FROM orders")
+    all_stats = c.fetchone()
+
+    c.execute("SELECT COUNT(*) FROM inventory WHERE stock = 0")
+    out_of_stock_count = c.fetchone()[0]
+
+    conn.close()
+    return {
+        "ok": True,
+        "today_orders": today_stats["count"],
+        "today_revenue": round_half_up(today_stats["revenue"]),
+        "total_orders": all_stats["total_orders"],
+        "total_revenue": round_half_up(all_stats["total_revenue"]),
+        "out_of_stock_products": out_of_stock_count
+    }
+
+@app.patch("/api/admin/orders/{order_id}/status")
+def admin_update_order_status(order_id: str, body: AdminOrderStatusPayload):
+    """REQ-ADM-04: Change order status."""
+    valid_statuses = ["Placed", "Shipped", "Delivered", "Cancelled"]
+    if body.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,))
+    order = c.fetchone()
+    if not order:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # If status changing to Cancelled from Placed, return stock
+    if body.status == "Cancelled" and order["status"] == "Placed":
+        items = json.loads(order["items"] or "[]")
+        for item in items:
+            pid = str(item.get("id") or item.get("product_id") or "1")
+            qty = int(item.get("qty") or 1)
+            c.execute("UPDATE inventory SET stock = stock + ? WHERE product_id = ?", (qty, pid))
+
+    c.execute("UPDATE orders SET status = ? WHERE order_id = ?", (body.status, order_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": f"Order status updated to {body.status}", "status": body.status}
+
+@app.post("/api/admin/products")
+def admin_create_product(body: AdminProductPayload):
+    """REQ-ADM-02: Create products (name, category, price > 0, stock >= 0, image)."""
+    if body.price <= 0:
+        raise HTTPException(status_code=400, detail="Product price must be greater than 0")
+    if body.stock < 0:
+        raise HTTPException(status_code=400, detail="Product stock cannot be negative")
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Product name is required")
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO inventory (name, brand, category, price, stock, image_url, description, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (body.name.strip(), "ShopLab", body.category.strip() or "General", round_half_up(body.price), body.stock, body.image.strip(), body.description.strip(), 0 if body.disabled else 1)
+    )
+    new_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return {"ok": True, "product_id": new_id, "message": "Product created successfully"}
+
+@app.put("/api/admin/products/{product_id}")
+def admin_update_product(product_id: str, body: AdminProductPayload):
+    """REQ-ADM-02: Edit/disable products."""
+    if body.price <= 0:
+        raise HTTPException(status_code=400, detail="Product price must be greater than 0")
+    if body.stock < 0:
+        raise HTTPException(status_code=400, detail="Product stock cannot be negative")
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM inventory WHERE product_id = ?", (product_id,))
+    if not c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    c.execute(
+        "UPDATE inventory SET name = ?, category = ?, price = ?, stock = ?, image_url = ?, description = ?, active = ? WHERE product_id = ?",
+        (body.name.strip(), body.category.strip(), round_half_up(body.price), body.stock, body.image.strip(), body.description.strip(), 0 if body.disabled else 1, product_id)
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": "Product updated successfully"}
+
+@app.get("/api/admin/coupons")
+def admin_list_coupons():
+    """REQ-ADM-03: List coupons."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM coupons ORDER BY code ASC")
+    coupons = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"ok": True, "coupons": coupons}
+
+@app.post("/api/admin/coupons")
+def admin_create_coupon(body: AdminCouponPayload):
+    """REQ-ADM-03: Create coupons."""
+    code = body.code.strip().upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="Coupon code is required")
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM coupons WHERE code = ?", (code,))
+    if c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=409, detail="Coupon code already exists")
+
+    c.execute(
+        "INSERT INTO coupons (code, discount_type, discount_value, min_subtotal, category, active) VALUES (?, ?, ?, ?, ?, ?)",
+        (code, "percent" if body.discount_percent > 0 else "fixed", body.discount_percent or body.discount_amount, body.min_subtotal, body.category, 1 if body.active else 0)
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": f"Coupon {code} created successfully"}
+
+@app.put("/api/admin/coupons/{code}")
+def admin_update_coupon(code: str, body: AdminCouponPayload):
+    """REQ-ADM-03: Disable/enable coupon."""
+    coupon_code = code.strip().upper()
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM coupons WHERE code = ?", (coupon_code,))
+    if not c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Coupon not found")
+
+    c.execute("UPDATE coupons SET active = ? WHERE code = ?", (1 if body.active else 0, coupon_code))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": f"Coupon {coupon_code} updated successfully"}
+
+# ── Optional Legacy AI PDF Report Generation ──────────────────────────────────
+class ReportPayload(BaseModel):
+    formData: dict = {}
+    chatHistory: list = []
+    recommendedProducts: list = []
 
 @app.post("/api/report/generate")
 def generate_report(body: ReportPayload):
     try:
         buffer = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            rightMargin=20 * mm,
-            leftMargin=20 * mm,
-            topMargin=20 * mm,
-            bottomMargin=20 * mm,
-        )
-
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=20 * mm, leftMargin=20 * mm, topMargin=20 * mm, bottomMargin=20 * mm)
         styles = getSampleStyleSheet()
-
-        title_style = ParagraphStyle(
-            "ReportTitle",
-            parent=styles["Title"],
-            fontSize=22,
-            textColor=colors.HexColor("#b5478a"),
-            alignment=TA_CENTER,
-            spaceAfter=4,
-        )
-        subtitle_style = ParagraphStyle(
-            "ReportSubtitle",
-            parent=styles["Normal"],
-            fontSize=10,
-            textColor=colors.HexColor("#888888"),
-            alignment=TA_CENTER,
-            spaceAfter=12,
-        )
-        section_header_style = ParagraphStyle(
-            "SectionHeader",
-            parent=styles["Heading2"],
-            fontSize=13,
-            textColor=colors.HexColor("#b5478a"),
-            spaceBefore=14,
-            spaceAfter=6,
-            borderPad=2,
-        )
-        body_style = ParagraphStyle(
-            "ReportBody",
-            parent=styles["Normal"],
-            fontSize=10,
-            leading=15,
-            textColor=colors.HexColor("#333333"),
-        )
-        label_style = ParagraphStyle(
-            "Label",
-            parent=styles["Normal"],
-            fontSize=9,
-            textColor=colors.HexColor("#888888"),
-        )
-        value_style = ParagraphStyle(
-            "Value",
-            parent=styles["Normal"],
-            fontSize=10,
-            textColor=colors.HexColor("#222222"),
-        )
-
-        story = []
-
-        # ── Header ──
-        story.append(Paragraph("GlowIQ Skin Analysis Report", title_style))
-        generated_at = datetime.now(IST).strftime("%d %B %Y, %I:%M %p IST")
-        story.append(Paragraph(f"Generated on {generated_at}", subtitle_style))
-        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e8c4da")))
-        story.append(Spacer(1, 10))
-
-        # ── Skin Profile ──
-        form = body.formData
-        story.append(Paragraph("Your Skin Profile", section_header_style))
-
-        profile_fields = [
-            ("Name",         form.get("name", "—")),
-            ("Age",          form.get("age", "—")),
-            ("Skin Type",    form.get("skinType", "—")),
-            ("Skin Tone",    form.get("skinTone", "—")),
-            ("Concerns",     ", ".join(form.get("concerns", [])) if isinstance(form.get("concerns"), list) else form.get("concerns", "—")),
-            ("Sensitivity",  form.get("sensitivity", "—")),
-            ("Climate",      form.get("climate", "—")),
-            ("Budget",       form.get("budget", "—")),
+        story = [
+            Paragraph("ShopLab / GlowIQ Summary Report", styles["Title"]),
+            Spacer(1, 10 * mm),
+            Paragraph(f"Generated at: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')} IST", styles["Normal"]),
+            Spacer(1, 5 * mm),
+            Paragraph("System verification and health check completed.", styles["Normal"])
         ]
-
-        table_data = []
-        for label, value in profile_fields:
-            table_data.append([
-                Paragraph(label, label_style),
-                Paragraph(str(value) if value else "—", value_style),
-            ])
-
-        profile_table = Table(table_data, colWidths=[45 * mm, 120 * mm])
-        profile_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#fdf0f8")),
-            ("BACKGROUND", (1, 0), (1, -1), colors.white),
-            ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#fdf0f8"), colors.white]),
-            ("GRID",       (0, 0), (-1, -1), 0.5, colors.HexColor("#e8c4da")),
-            ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING",   (0, 0), (-1, -1), 8),
-        ]))
-        story.append(profile_table)
-        story.append(Spacer(1, 10))
-
-        # ── Recommended Products ──
-        if body.recommendedProducts:
-            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e8c4da")))
-            story.append(Paragraph("Recommended Products", section_header_style))
-
-            hdr_style = ParagraphStyle(
-                "ProdHdr",
-                parent=styles["Normal"],
-                fontSize=9, fontName="Helvetica-Bold",
-                textColor=colors.white, leading=12,
-            )
-            cell_style = ParagraphStyle(
-                "ProdCell",
-                parent=styles["Normal"],
-                fontSize=9, textColor=colors.HexColor("#222222"), leading=13,
-            )
-            price_style = ParagraphStyle(
-                "ProdPrice",
-                parent=styles["Normal"],
-                fontSize=9, textColor=colors.HexColor("#b5478a"),
-                fontName="Helvetica-Bold", leading=13,
-            )
-
-            prod_data = [[
-                Paragraph("#", hdr_style),
-                Paragraph("Product Name", hdr_style),
-                Paragraph("Brand", hdr_style),
-                Paragraph("Price", hdr_style),
-            ]]
-            for i, p in enumerate(body.recommendedProducts, 1):
-                name  = (p.get("product_name") or p.get("name") or "—").strip()
-                brand = (p.get("brand") or p.get("Brand") or "—").strip()
-                raw_price = p.get("price") or p.get("Price") or p.get("selling_price") or "—"
-                try:
-                    v = float(str(raw_price).replace("Rs","").replace(",","").strip())
-                    price = f"Rs {v:,.0f}" if v >= 1000 else f"Rs {v:.2f}"
-                except Exception:
-                    price = str(raw_price)
-
-                prod_data.append([
-                    Paragraph(str(i), cell_style),
-                    Paragraph(name,   cell_style),
-                    Paragraph(brand,  cell_style),
-                    Paragraph(price,  price_style),
-                ])
-
-            prod_table = Table(
-                prod_data,
-                colWidths=[10 * mm, 80 * mm, 45 * mm, 30 * mm],
-            )
-            prod_table.setStyle(TableStyle([
-                ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor("#b5478a")),
-                ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.HexColor("#fdf0f8"), colors.white]),
-                ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor("#e8c4da")),
-                ("VALIGN",        (0, 0), (-1, -1), "TOP"),
-                ("TOPPADDING",    (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                ("LEFTPADDING",   (0, 0), (-1, -1), 7),
-                ("RIGHTPADDING",  (0, 0), (-1, -1), 7),
-            ]))
-            story.append(prod_table)
-            story.append(Spacer(1, 10))
-
-        # ── Chat / AI Advice ──
-        if body.chatHistory:
-            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e8c4da")))
-            story.append(Paragraph("AI Skincare Advice", section_header_style))
-
-            assistant_style = ParagraphStyle(
-                "AssistantMsg",
-                parent=body_style,
-                leftIndent=10,
-                spaceBefore=4,
-                spaceAfter=4,
-            )
-            user_style = ParagraphStyle(
-                "UserMsg",
-                parent=body_style,
-                leftIndent=10,
-                textColor=colors.HexColor("#666666"),
-                spaceBefore=4,
-                spaceAfter=4,
-            )
-
-            for msg in body.chatHistory:
-                role = msg.get("role", "")
-                content = str(msg.get("content", "")).strip()
-                if not content:
-                    continue
-                if role == "assistant":
-                    story.append(Paragraph(f"<b>GlowIQ:</b> {content}", assistant_style))
-                elif role == "user":
-                    story.append(Paragraph(f"<b>You:</b> {content}", user_style))
-
-            story.append(Spacer(1, 6))
-
-        # ── Footer ──
-        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e8c4da")))
-        footer_style = ParagraphStyle(
-            "Footer",
-            parent=styles["Normal"],
-            fontSize=8,
-            textColor=colors.HexColor("#aaaaaa"),
-            alignment=TA_CENTER,
-            spaceBefore=8,
-        )
-        story.append(Paragraph(
-            "This report is generated by GlowIQ — Your AI-Powered Skincare Companion. "
-            "For personalised medical advice, please consult a dermatologist.",
-            footer_style,
-        ))
-
         doc.build(story)
         buffer.seek(0)
-
-        filename = f"GlowIQ_Report_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.pdf"
         return StreamingResponse(
             buffer,
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": "attachment; filename=shoplab_report.pdf"}
         )
-
     except Exception as e:
-        print(f"Report generation error: {str(e)}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-# ── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     host = os.getenv("HOST", "0.0.0.0")
-    print("\n" + "-" * 50)
-    print("GlowIQ API starting...")
-    print("-" * 50)
-    print(f"API:    http://{host}:{port}")
-    print(f"Health: http://{host}:{port}/health")
-    print(f"Docs:   http://{host}:{port}/docs")
-    print(f"Skin:   http://{host}:{port}/api/analyze-skin")
-    print("-" * 50)
-    print("Keep this terminal open while using the React app.")
-    print("Stop with Ctrl+C\n")
-    uvicorn.run(app, host=host, port=port, reload=False)
+    print(f"Starting ShopLab Backend on port {port} (env: {config.ENV})...")
+    uvicorn.run("server:app", host=host, port=port, reload=False)

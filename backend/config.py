@@ -3,28 +3,26 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-APP_ENV = os.getenv("APP_ENV", "production").lower().strip()
+APP_ENV = os.getenv("APP_ENV", "qa").lower().strip()
 
 class AppConfig:
     ENV = APP_ENV
-    IS_PRODUCTION = (APP_ENV == "production")
+    IS_PRODUCTION = (APP_ENV in ["production", "prod"])
     IS_QA = (APP_ENV == "qa")
 
-    # Regional Tax Configuration
-    # Section 5.4 REQ-PRC-05: Tax 8% in Prod, Section 8.2: 18% in QA
-    TAX_RATE = 0.18 if IS_QA else float(os.getenv("TAX_RATE", "0.08"))
+    # Regional Tax Configuration (REQ-PRC-05: Tax 8% via TAX_RATE=0.08)
+    TAX_RATE = float(os.getenv("TAX_RATE", "0.08"))
 
-    # Security & Authentication Lockout Policy (Section 5.1 REQ-ACC-02)
-    # Section 8.2: Locks after 3 attempts in QA, 5 attempts in 15 minutes in Prod
-    LOCKOUT_THRESHOLD = 3 if IS_QA else 5
-    LOCKOUT_WINDOW_MINUTES = None if IS_QA else 15
+    # Security & Authentication Lockout Policy (REQ-ACC-02: 5 wrong attempts in 15 minutes)
+    LOCKOUT_THRESHOLD = int(os.getenv("LOCKOUT_THRESHOLD", "5"))
+    LOCKOUT_WINDOW_MINUTES = int(os.getenv("LOCKOUT_WINDOW_MINUTES", "15"))
 
-    # Shipping Fees (Section 5.4 REQ-PRC-04)
-    # Standard 5.99, free when (subtotal - discount) >= 100.00; Express 14.99
+    # Shipping Fees (REQ-PRC-04: Standard 5.99, free when (subtotal - discount) >= 100.00; Express 14.99)
     SHIPPING_RATES_USD = {
         "regular": 5.99,
         "standard": 5.99,
         "express": 14.99,
+        "sameday": 24.99,
     }
     FREE_SHIPPING_THRESHOLD_USD = 100.00
 
@@ -37,7 +35,7 @@ class AppConfig:
     }
     FREE_SHIPPING_THRESHOLD_IDR = 100000
 
-    # Promotional & Coupon Rules (Section 5.4 REQ-PRC-03)
+    # Promotional & Coupon Rules (REQ-PRC-03)
     AVAILABLE_COUPONS = {
         "SAVE10": {
             "code": "SAVE10",

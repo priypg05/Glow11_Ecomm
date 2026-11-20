@@ -250,6 +250,77 @@ def test_frontend_files():
         print(f"Error: {e}")
         return False
 
+def test_shoplab_business_rules():
+    """Test ShopLab functional requirements, worked example, lockout, and endpoints"""
+    print("\n" + "="*60)
+    print("TEST 5: ShopLab E-Commerce Requirements & Benchmark")
+    print("="*60)
+    try:
+        from fastapi.testclient import TestClient
+        from server import app
+        client = TestClient(app)
+
+        # 1. Reset endpoint (Section 7)
+        r_reset = client.post("/api/test/reset")
+        assert r_reset.status_code == 200, f"Reset failed: {r_reset.text}"
+        print("✓ POST /api/test/reset succeeds")
+
+        # 2. Health endpoint (Section 7)
+        r_health = client.get("/api/health")
+        assert r_health.status_code == 200 and r_health.json().get("status") == "ok"
+        print("✓ GET /api/health succeeds")
+
+        # 3. Worked Example benchmark (Section 5.4 REQ-PRC-07)
+        # 2 × Wireless Mouse at 24.50 + 1 × USB-C Hub at 59.99, coupon SAVE10, standard shipping
+        cart_items = [
+            {"id": "1001", "name": "Wireless Mouse", "brand": "ShopLab", "qty": 2, "price": 24.50, "category": "Electronics"},
+            {"id": "1002", "name": "USB-C Hub", "brand": "ShopLab", "qty": 1, "price": 59.99, "category": "Electronics"}
+        ]
+        cp = client.post("/api/cart/coupon", json={"code": "SAVE10", "subtotal": 108.99, "items": cart_items}).json()
+        assert cp["discount"] == 10.90, f"Coupon discount mismatch: {cp}"
+
+        order_res = client.post("/api/orders", json={
+            "user_email": "customer1@shoplab.test",
+            "items": cart_items,
+            "coupon_code": "SAVE10",
+            "shipping_method": "standard",
+            "address": "123 Market St, San Jose 95113"
+        }).json()
+        assert order_res["subtotal"] == 108.99, f"Subtotal mismatch: {order_res}"
+        assert order_res["discount"] == 10.90, f"Discount mismatch: {order_res}"
+        assert order_res["shipping"] == 5.99, f"Shipping mismatch: {order_res}"
+        assert order_res["tax"] == 8.33, f"Tax mismatch: {order_res}"
+        assert order_res["total"] == 112.41, f"Total mismatch: {order_res}"
+        assert order_res["order_id"].startswith("ORD-"), f"Order ID mismatch: {order_res}"
+        print("✓ Worked example benchmark PASSED: Subtotal 108.99, Discount 10.90, Shipping 5.99, Tax 8.33, Total 112.41")
+
+        # 4. Out of stock conflict (REQ-CHK-05)
+        oos = client.post("/api/orders", json={
+            "user_email": "customer1@shoplab.test",
+            "items": [{"id": "1003", "name": "Out of Stock Gadget", "qty": 1, "price": 19.99}]
+        })
+        assert oos.status_code == 409, f"Expected 409 Conflict, got {oos.status_code}"
+        print("✓ Out of stock conflict 409 PASSED")
+
+        # 5. Order cancellation (REQ-ORD-02)
+        can = client.post(f"/api/orders/{order_res['order_id']}/cancel")
+        assert can.status_code == 200 and can.json().get("status") == "Cancelled"
+        print("✓ Order cancellation and stock return PASSED")
+
+        # 6. Locked user (REQ-ACC-02)
+        lock_res = client.post("/api/auth/login", json={"email": "locked@shoplab.test", "password": "WrongPassword!"})
+        assert lock_res.status_code == 423
+        assert lock_res.json()["error"]["message"] == "Your account is locked"
+        print("✓ Locked account 423 PASSED")
+
+        print("\n✅ ShopLab Business Rules: PASSED")
+        return True
+    except Exception as e:
+        print(f"\n❌ ShopLab Business Rules: FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     """Run all tests"""
     print("\n" + "="*60)
@@ -263,6 +334,7 @@ def main():
     results.append(("Recommendation Engine", test_recommendation_engine()))
     results.append(("Auth Database", test_auth_database()))
     results.append(("Frontend Files", test_frontend_files()))
+    results.append(("ShopLab Requirements & Benchmark", test_shoplab_business_rules()))
     
     # Summary
     print("\n" + "="*60)
