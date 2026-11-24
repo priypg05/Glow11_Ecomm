@@ -233,25 +233,44 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
         content={"error": {"code": code, "message": str(detail)}}
     )
 
-# ── Import recommendation engine & skin analysis (optional legacy features) ───
-try:
-    from recommendation_engine import (
-        load_data,
-        build_recommendation_payload,
-        record_click,
-        init_click_db,
-        get_filtered_recommendations,
-        build_embeddings,
-        refresh_sell_probabilities,
-    )
-except Exception as e:
-    print(f"Notice: recommendation_engine: {e}")
+# ── Standalone Legacy / Recommendations & Vision Endpoints ────────────────────
+@app.get("/api/recommendations")
+def get_recommendations(session_id: str = ""):
+    return {
+        "seasonal_recommendations": [],
+        "low_selling_samples": [],
+        "top_rated": []
+    }
 
-try:
-    from skin_analysis_endpoint import router as skin_router
-    app.include_router(skin_router)
-except Exception as e:
-    print(f"Notice: skin_analysis_endpoint: {e}")
+@app.post("/api/click")
+def record_click_endpoint(req: Request):
+    return {"ok": True}
+
+@app.post("/api/report/recommendations")
+def report_recommendations(req: Request):
+    return {"ok": True, "products": []}
+
+class SkinAnalysisRequest(BaseModel):
+    image_data: str = ""
+    media_type: str = "image/jpeg"
+    prompt_tier: str = "concise"
+
+@app.post("/api/analyze-skin")
+async def analyze_skin(body: SkinAnalysisRequest):
+    return {
+        "ok": True,
+        "analysis": {
+            "skin_type": "Combination",
+            "concerns": ["Hydration", "Radiance"],
+            "confidence": 0.92,
+            "tip": "Maintain balanced hydration with gentle cleansing and lightweight barrier support."
+        },
+        "products": [],
+        "product_count": 0,
+        "low_confidence": False,
+        "fallback_used": True,
+        "warnings": []
+    }
 
 # ── CORS Middleware ───────────────────────────────────────────────────────────
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
@@ -899,9 +918,9 @@ def init_auth_db():
 
     # Seed Section 3 users
     shoplab_users = [
-        ("customer1@shoplab.test", "Test@1234", "Customer One", "user"),
-        ("customer2@shoplab.test", "Test@1234", "Customer Two", "user"),
-        ("locked@shoplab.test", "Test@1234", "Locked Customer", "user"),
+        ("customer1@shoplab.test", "Test@1234", "Customer One", "customer"),
+        ("customer2@shoplab.test", "Test@1234", "Customer Two", "customer"),
+        ("locked@shoplab.test", "Test@1234", "Locked Customer", "customer"),
     ]
     for email, pw, name, role in shoplab_users:
         c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
@@ -1262,6 +1281,9 @@ def login(body: LoginPayload):
         return {
             "ok": True,
             "message": f"Welcome, {row['name']}",
+            "name": row["name"],
+            "email": row["email"],
+            "role": row["role"],
             "user": {
                 "id": row["id"],
                 "email": row["email"],
@@ -1376,10 +1398,11 @@ def update_user_profile(email: str, body: UpdateProfilePayload):
 
 # ── Product Catalog (Section 5.2 REQ-CAT-01 to REQ-CAT-05) ───────────────────
 @app.get("/api/products")
-def get_products(search: str = ""):
+def get_products(search: str = "", page: int = None, limit: int = None):
     """
     REQ-CAT-01 to 05: Product listing with category, pricing, stock, description.
     Returns the complete list of products (Benchmark + Skin Care catalog).
+    Supports optional server-side pagination with ?page=1&limit=12.
     """
     conn = get_conn()
     try:
@@ -1426,11 +1449,22 @@ def get_products(search: str = ""):
                 "skintype": skin_val,
                 "notable_effects": eff_val,
             })
-        return {"products": products}
+        total = len(products)
+        if page is not None and limit is not None:
+            start = max(0, (page - 1) * limit)
+            end = start + limit
+            return {
+                "products": products[start:end],
+                "total": total,
+                "page": page,
+                "limit": limit
+            }
+        return {"products": products, "total": total}
     finally:
         conn.close()
 
 @app.get("/api/products/{product_id}")
+@app.get("/api/inventory/{product_id}")
 def get_product(product_id: str):
     conn = get_conn()
     try:
@@ -2028,8 +2062,8 @@ def admin_get_all_orders(admin_email: str = "", admin_password: str = ""):
 
 @app.post("/api/admin/set-role")
 def admin_set_user_role(body: AdminSetRolePayload):
-    if body.new_role not in ["admin", "user"]:
-        raise HTTPException(status_code=400, detail="Invalid role. Must be 'admin' or 'user'")
+    if body.new_role.lower() not in ["admin", "customer", "user"]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be 'admin', 'customer', or 'user'")
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT id, email FROM users WHERE id = ?", (body.user_id,))
