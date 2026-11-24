@@ -20,18 +20,191 @@ import hashlib
 import traceback
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-from config import config
-from pricing import (
-    calculateLineTotal,
-    calculateSubtotal,
-    calculateDiscount,
-    calculateShipping,
-    calculateTax,
-    calculateOrderTotal,
-    round_half_up,
-)
+from decimal import Decimal, ROUND_HALF_UP
 
 load_dotenv()
+
+# ── Application Configuration (Section 2 & Section 9) ─────────────────────────
+APP_ENV = os.getenv("APP_ENV", "qa").lower().strip()
+
+class AppConfig:
+    ENV = APP_ENV
+    IS_PRODUCTION = (APP_ENV in ["production", "prod"])
+    IS_QA = (APP_ENV == "qa")
+
+    # Regional Tax Configuration (REQ-PRC-05)
+    TAX_RATE = float(os.getenv("TAX_RATE", "0.18"))
+
+    # Security & Authentication Lockout Policy (REQ-ACC-02)
+    LOCKOUT_THRESHOLD = int(os.getenv("LOCKOUT_THRESHOLD", "3"))
+    LOCKOUT_WINDOW_MINUTES = None if IS_QA else int(os.getenv("LOCKOUT_WINDOW_MINUTES", "15"))
+
+    # Shipping Fees (REQ-PRC-04)
+    SHIPPING_RATES_USD = {
+        "regular": 5.99,
+        "standard": 5.99,
+        "express": 14.99,
+        "sameday": 24.99,
+    }
+    FREE_SHIPPING_THRESHOLD_USD = 100.00
+
+    # IDR / Rs Legacy Shipping Rates
+    SHIPPING_RATES_IDR = {
+        "regular": 15000,
+        "standard": 15000,
+        "express": 35000,
+        "sameday": 55000,
+    }
+    FREE_SHIPPING_THRESHOLD_IDR = 100000
+
+    # Promotional & Coupon Rules (REQ-PRC-03)
+    AVAILABLE_COUPONS = {
+        "SAVE10": {
+            "code": "SAVE10",
+            "type": "percent",
+            "discount_percent": 0.10,
+            "min_subtotal": 0.0,
+            "max_discount": float("inf"),
+            "description": "10% off subtotal",
+        },
+        "FLAT50": {
+            "code": "FLAT50",
+            "type": "flat",
+            "flat_discount": 50.0,
+            "min_subtotal": 300.0,
+            "max_discount": 50.0,
+            "description": "50.00 off when subtotal >= 300.00",
+        },
+        "FREESHIP": {
+            "code": "FREESHIP",
+            "type": "freeship",
+            "discount_percent": 0.0,
+            "min_subtotal": 0.0,
+            "max_discount": float("inf"),
+            "description": "Free shipping on entire order",
+        },
+        "ELEC15": {
+            "code": "ELEC15",
+            "type": "category_percent",
+            "category": "Electronics",
+            "discount_percent": 0.15,
+            "min_subtotal": 0.0,
+            "max_discount": float("inf"),
+            "description": "15% off Electronics items only",
+        },
+        "EXPIRED5": {
+            "code": "EXPIRED5",
+            "type": "expired",
+            "expired": True,
+            "min_subtotal": 0.0,
+            "max_discount": 0.0,
+            "description": "This coupon has expired",
+        },
+        "GLOW20": {
+            "code": "GLOW20",
+            "type": "percent",
+            "discount_percent": 0.20,
+            "min_subtotal": 50000,
+            "max_discount": 30000,
+            "description": "20% off skincare orders over Rs 50,000",
+        },
+        "WELCOME10": {
+            "code": "WELCOME10",
+            "type": "percent",
+            "discount_percent": 0.10,
+            "min_subtotal": 20000,
+            "max_discount": 15000,
+            "description": "10% off skincare welcome coupon",
+        },
+    }
+
+config = AppConfig()
+
+# ── Section 5.4 Business Rules Functions (One rule per function) ──────────────
+def round_half_up(value: float) -> float:
+    """Mathematical half-up rounding to 2 decimal places."""
+    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+def calculateLineTotal(unit_price: float, quantity: int) -> float:
+    """REQ-PRC-01: Line total = unit price * quantity."""
+    return round_half_up(float(unit_price) * int(quantity))
+
+def calculateSubtotal(items: list) -> float:
+    """REQ-PRC-02: Subtotal = sum of line totals."""
+    total = 0.0
+    for item in items:
+        price = float(item.get("price", 0.0))
+        qty = int(item.get("qty", 1))
+        total += calculateLineTotal(price, qty)
+    return round_half_up(total)
+
+def calculateDiscount(subtotal: float, coupon_code: str, items: list = None, shipping: float = 0.0) -> tuple[float, str]:
+    """REQ-PRC-03: Coupons."""
+    code = (coupon_code or "").strip().upper()
+    if not code:
+        return 0.0, ""
+
+    if code == "SAVE10":
+        discount_base = subtotal + (shipping if shipping else 5.99)
+        discount = round_half_up(discount_base * 0.10)
+        return min(discount, subtotal), "10% off subtotal applied"
+
+    if code == "FLAT50":
+        if subtotal < 300.00:
+            raise ValueError("Minimum subtotal of 300.00 required for coupon FLAT50")
+        return min(50.00, subtotal), "50.00 flat discount applied"
+
+    if code == "FREESHIP":
+        return 0.0, "Free shipping coupon applied"
+
+    if code == "ELEC15":
+        discount = round_half_up(subtotal * 0.15)
+        return min(discount, subtotal), "15% off Electronics items applied"
+
+    if code == "EXPIRED5":
+        raise KeyError("This coupon has expired")
+
+    if code == "GLOW20":
+        discount_base = subtotal + (shipping if shipping else 15000.0)
+        discount = round_half_up(discount_base * 0.20)
+        return min(discount, min(subtotal, 30000.0)), "20% off applied"
+
+    if code == "WELCOME10":
+        discount = round_half_up(subtotal * 0.10)
+        return min(discount, min(subtotal, 15000.0)), "10% off applied"
+
+    raise LookupError("Invalid coupon")
+
+def calculateShipping(subtotal: float, discount: float, shipping_method: str = "standard", coupon_code: str = "") -> float:
+    """REQ-PRC-04: Shipping charges."""
+    code = (coupon_code or "").strip().upper()
+    method = (shipping_method or "standard").lower().strip()
+
+    if code == "FREESHIP":
+        return 0.0
+
+    net_subtotal = max(0.0, subtotal - discount)
+    if net_subtotal > 100.00:
+        return 0.0
+
+    if method in ["standard", "regular"]:
+        return 5.99
+    elif method == "express":
+        return 14.99
+    elif method == "sameday":
+        return 24.99
+    else:
+        return 5.99
+
+def calculateTax(subtotal: float, discount: float, shipping: float, tax_rate: float = 0.18) -> float:
+    """REQ-PRC-05: Tax calculation."""
+    taxable_base = max(0.0, subtotal - discount + shipping)
+    return round_half_up(taxable_base * tax_rate)
+
+def calculateOrderTotal(subtotal: float, discount: float, shipping: float, tax: float) -> float:
+    """REQ-PRC-06: Order total = subtotal - discount + shipping + tax."""
+    total = max(0.0, subtotal - discount + shipping + tax)
+    return round_half_up(total)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
