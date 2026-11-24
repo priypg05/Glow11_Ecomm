@@ -297,7 +297,7 @@ function OrderSummary({ T, items, shippingMethod = "standard", appliedCoupon, co
         </button>
       </div>
       {couponMsg && (
-        <div data-testid="coupon-message" style={{ fontSize: 12, marginTop: 6, color: appliedCoupon ? T.success : T.danger, fontWeight: 600 }}>
+        <div data-testid="coupon-message" style={{ fontSize: 12, marginTop: 6, color: (couponMsg.toLowerCase().includes("invalid") || couponMsg.toLowerCase().includes("expired") || couponMsg.toLowerCase().includes("please") || !appliedCoupon) ? T.danger : T.success, fontWeight: 600 }}>
           {couponMsg}
         </div>
       )}
@@ -349,9 +349,24 @@ function AddressStep({ T, data, setData, onNext }) {
     setErrorMsg("");
   };
 
+  const isNameValid = Boolean(data.name && data.name.trim());
+  const isEmailValid = Boolean(data.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim()));
+  const isStreetValid = Boolean(data.street && data.street.trim());
+  const isCityValid = Boolean(data.city && data.city.trim());
+  const isPostalValid = Boolean(data.postal && /^\d{5}$/.test(data.postal.trim()));
+  const phoneClean = (data.phone || "").replace(/\D/g, "");
+  const isPhoneValid = /^\d{10}$/.test(phoneClean);
+  const isShippingValid = Boolean(data.shipping && (data.shipping === "standard" || data.shipping === "express"));
+
+  const isFormValid = isNameValid && isEmailValid && isStreetValid && isCityValid && isPostalValid && isPhoneValid && isShippingValid;
+
   const validate = () => {
     if (!data.name?.trim()) {
       setErrorMsg("Full Name is required.");
+      return false;
+    }
+    if (!data.email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email.trim())) {
+      setErrorMsg("Please enter a valid email address.");
       return false;
     }
     if (!data.street?.trim()) {
@@ -362,16 +377,19 @@ function AddressStep({ T, data, setData, onNext }) {
       setErrorMsg("City is required.");
       return false;
     }
-    // REQ-CHK-02: postal code validation
-    const isPostalValid = Boolean(data.postal && data.postal.length > 5);
-    if (!isPostalValid) {
-      setErrorMsg("Postal code must be more than 5 digits.");
+    // REQ-CHK-02: postal code validation (5 digits)
+    if (!data.postal || !/^\d{5}$/.test(data.postal.trim())) {
+      setErrorMsg("Postal code must be exactly 5 digits.");
       return false;
     }
     // REQ-CHK-02: phone 10 digits
-    const phoneClean = (data.phone || "").replace(/\D/g, "");
-    if (!/^\d{10}$/.test(phoneClean)) {
+    const phoneDigits = (data.phone || "").replace(/\D/g, "");
+    if (!/^\d{10}$/.test(phoneDigits)) {
       setErrorMsg("Phone number must be exactly 10 digits.");
+      return false;
+    }
+    if (!data.shipping) {
+      setErrorMsg("Please select a shipping method.");
       return false;
     }
     return true;
@@ -497,14 +515,14 @@ function AddressStep({ T, data, setData, onNext }) {
           className="pg-step-btn"
           data-testid="continue-to-payment-btn"
           onClick={handleContinue}
-          disabled={!Boolean(data.postal && data.postal.length > 5)}
+          disabled={!isFormValid}
           style={{
             width: "100%", marginTop: 16, padding: "14px",
             borderRadius: 12, border: "none",
-            background: (!data.postal || data.postal.length <= 5) ? T.border : T.accentGrad,
+            background: !isFormValid ? T.border : T.accentGrad,
             color: "#fff",
             fontSize: 15, fontWeight: 700,
-            cursor: (!data.postal || data.postal.length <= 5) ? "not-allowed" : "pointer",
+            cursor: !isFormValid ? "not-allowed" : "pointer",
           }}
         >
           Continue to Payment →
@@ -946,15 +964,14 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
       });
 
       const data = await resp.json();
-      if (!resp.ok) {
-        setAppliedCoupon(null);
-        setCouponMsg(data.error?.message || data.detail || "Invalid coupon");
+      if (!resp.ok || data.ok === false || data.valid === false) {
+        setCouponMsg(data.error?.message || data.message || data.detail || "Invalid coupon");
       } else {
         setAppliedCoupon({ code, discount: data.discount });
         setCouponMsg(data.message || "Coupon applied successfully");
+        setCouponCode("");
       }
     } catch {
-      setAppliedCoupon(null);
       setCouponMsg("Invalid coupon");
     }
   };

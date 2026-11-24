@@ -695,15 +695,14 @@ export default function StoreFront({
         }),
       });
       const data = await resp.json();
-      if (!resp.ok) {
-        setAppliedCoupon(null);
-        setCouponMsg(data.error?.message || data.detail || "Invalid coupon");
+      if (!resp.ok || data.ok === false || data.valid === false) {
+        setCouponMsg(data.error?.message || data.message || data.detail || "Invalid coupon");
       } else {
         setAppliedCoupon({ code, discount: data.discount });
         setCouponMsg(data.message || "Coupon applied successfully");
+        setCouponCode("");
       }
     } catch {
-      setAppliedCoupon(null);
       setCouponMsg("Invalid coupon");
     }
   };
@@ -971,7 +970,7 @@ export default function StoreFront({
                     />
                     <button data-testid="apply-coupon-btn" onClick={handleApplyCoupon} style={{ padding: "8px 12px", borderRadius: 8, border: "none", background: T.accent, color: "#fff", fontWeight: 700, fontSize: "0.8rem", cursor: "pointer" }}>Apply</button>
                   </div>
-                  {couponMsg && <div data-testid="coupon-message" style={{ fontSize: "0.75rem", marginTop: 4, color: appliedCoupon ? T.success : T.danger, fontWeight: 600 }}>{couponMsg}</div>}
+                  {couponMsg && <div data-testid="coupon-message" style={{ fontSize: "0.75rem", marginTop: 4, color: (couponMsg.toLowerCase().includes("invalid") || couponMsg.toLowerCase().includes("expired") || couponMsg.toLowerCase().includes("please") || !appliedCoupon) ? T.danger : T.success, fontWeight: 600 }}>{couponMsg}</div>}
                 </div>
 
                 {/* Financial Summary */}
