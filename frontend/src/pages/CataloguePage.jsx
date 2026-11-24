@@ -3,6 +3,7 @@ import { useState } from "react";
 import { ALL_PRODUCTS } from "../data/products";
 import { C } from "../theme/colors";
 import { SectionTitle, Badge } from "../components/Shared";
+import { FALLBACK_PRODUCT_IMAGE } from "../config/constants";
 
 const TYPES = ["All", "Serum", "Toner", "Moisturizer", "Sunscreen", "Face Wash"];
 const TIERS = ["All", "Budget", "Mid-Range", "Premium", "Luxury"];
@@ -115,16 +116,14 @@ export default function CataloguePage() {
                 overflow: "hidden",
                 position: "relative",
               }}>
-                {hasImg ? (
-                  <img
-                    src={p.picture_src||p.img}
-                    alt={p.product_name||p.name}
-                    onError={() => setImgErrors(prev => ({ ...prev, [imgKey]: true }))}
-                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                  />
-                ) : (
-                  <span style={{ fontSize: 44 }}>🧴</span>
-                )}
+                <img
+                  src={!imgErrors[imgKey] && (p.picture_src || p.img) ? (p.picture_src || p.img) : FALLBACK_PRODUCT_IMAGE}
+                  alt={p.product_name || p.name}
+                  onError={() => {
+                    setImgErrors(prev => ({ ...prev, [imgKey]: true }));
+                  }}
+                  style={{ width: "100%", height: "100%", objectFit: "contain", padding: 6 }}
+                />
                 {/* Tier badge overlay */}
                 <div style={{
                   position: "absolute", top: 8, right: 8,

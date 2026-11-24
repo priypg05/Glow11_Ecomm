@@ -3,6 +3,7 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import { ALL_PRODUCTS } from "../data/products";
 import { useAuth } from "../auth/AuthContext";
 import { API_BASE_URL, ENDPOINTS } from "../config/api";
+import { FALLBACK_PRODUCT_IMAGE } from "../config/constants";
 import ProductDetailPage from "./ProductDetailPage";
 import PaymentGateway from "./PaymentGateway";
 
@@ -42,10 +43,9 @@ function fmtPrice(n) {
 function parsePrice(str) {
   if (typeof str === "number") return str;
   if (!str) return 0;
-  const s = String(str).trim();
-  if (s.includes(".") && !s.includes(",")) {
-    const val = parseFloat(s.replace(/[^0-9.]/g, ""));
-    if (!isNaN(val)) return val;
+  let s = String(str).trim();
+  if (typeof s === "string" && s.includes(".")) {
+    s = s.split(".")[0];
   }
   return parseFloat(s.replace(/[^0-9.]/g, "")) || 0;
 }
@@ -58,7 +58,15 @@ const VIEW_ORDERS = "orders";
 const VIEW_WISHLIST = "wishlist";
 const VIEW_PROFILE = "profile";
 
-export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false, onCheckoutHandled }) {
+export default function StoreFront({
+  onRequestLogin,
+  initialCheckoutOpen = false,
+  onCheckoutHandled,
+  currentPath,
+  initialView,
+  initialProductId,
+  initialCartOpen = false,
+}) {
   const { user, logout } = useAuth();
   const T = THEMES.blossom.light;
 
@@ -79,21 +87,117 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
     }));
   });
 
-  const [view, setView] = useState(VIEW_HOME);
-  const [selectedProduct, setSelectedProduct] = useState(null);
+  const getInitialView = () => {
+    if (initialView) {
+      if (initialView === "orders") return VIEW_ORDERS;
+      if (initialView === "wishlist") return VIEW_WISHLIST;
+      if (initialView === "profile") return VIEW_PROFILE;
+      if (initialView === "catalogue") return VIEW_CAT;
+      return VIEW_HOME;
+    }
+    const p = typeof window !== "undefined" ? window.location.pathname : "";
+    if (p === "/wishlist") return VIEW_WISHLIST;
+    if (p === "/orders" || p === "/order-history") return VIEW_ORDERS;
+    if (p === "/profile") return VIEW_PROFILE;
+    if (p === "/catalogue" || p === "/products") return VIEW_CAT;
+    if (p === "/" || p === "/home") {
+      try {
+        const saved = localStorage.getItem("shoplab_last_view");
+        if (saved && [VIEW_CAT, VIEW_ORDERS, VIEW_WISHLIST, VIEW_PROFILE].includes(saved)) {
+          return saved;
+        }
+      } catch {}
+    }
+    return VIEW_HOME;
+  };
+  const [view, setViewState] = useState(getInitialView);
+  const setView = (newView) => {
+    setViewState(newView);
+    try {
+      localStorage.setItem("shoplab_last_view", newView);
+    } catch {}
+  };
+
+  const getInitialSelectedProduct = () => {
+    let pid = initialProductId;
+    if (!pid && typeof window !== "undefined" && window.location.pathname.startsWith("/product/")) {
+      pid = decodeURIComponent(window.location.pathname.replace("/product/", "").split("/")[0]);
+    }
+    if (pid) {
+      const found = ALL_PRODUCTS.find((p, i) => String(p.id || p.product_id || (1001 + i)) === String(pid));
+      if (found) {
+        return {
+          id: String(found.id || found.product_id || pid),
+          name: (found.name || found.product_name || "Product").trim(),
+          brand: (found.brand || "ShopLab").trim(),
+          category: (found.category || found.product_type || found.type || "General").trim(),
+          type: (found.product_type || found.type || found.category || "General").trim(),
+          price: parsePrice(found.price || found.price_num),
+          old_price: found.old_price ? parsePrice(found.old_price) : null,
+          stock: typeof found.stock === "number" ? found.stock : 20,
+          description: found.description || "High quality product.",
+          rating: found.rating ?? 4.5,
+          reviewCount: found.review_count ?? found.reviewCount ?? 12,
+          img: found.picture_src || found.img || "",
+        };
+      }
+    }
+    return null;
+  };
+  const [selectedProduct, setSelectedProduct] = useState(getInitialSelectedProduct);
   const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("All");
-  const [minPrice, setMinPrice] = useState("");
-  const [maxPrice, setMaxPrice] = useState("");
-  const [minRating4, setMinRating4] = useState(false);
-  const [inStockOnly, setInStockOnly] = useState(false);
+  // Applied filters (used by filtered useMemo)
+  const [appliedCategoryFilter, setAppliedCategoryFilter] = useState("All");
+  const [appliedMinPrice, setAppliedMinPrice] = useState("");
+  const [appliedMaxPrice, setAppliedMaxPrice] = useState("");
+  const [appliedMinRating4, setAppliedMinRating4] = useState(false);
+  const [appliedInStockOnly, setAppliedInStockOnly] = useState(false);
+
+  // Draft filters (for sidebar inputs before clicking Apply Filters)
+  const [draftCategory, setDraftCategory] = useState("All");
+  const [draftMinPrice, setDraftMinPrice] = useState("");
+  const [draftMaxPrice, setDraftMaxPrice] = useState("");
+  const [draftMinRating4, setDraftMinRating4] = useState(false);
+  const [draftInStockOnly, setDraftInStockOnly] = useState(false);
+
   const [sortBy, setSortBy] = useState("default");
   const [page, setPage] = useState(1);
 
-  const [cart, setCart] = useState([]);
-  const [cartOpen, setCartOpen] = useState(false);
-  const [checkoutOpen, setCheckoutOpen] = useState(initialCheckoutOpen);
-  const [wishlist, setWishlist] = useState([]);
+  // Synchronously restore cart from localStorage to prevent loss on reload
+  const [cart, setCart] = useState(() => {
+    try {
+      const sessionUser = JSON.parse(localStorage.getItem("glowiq_session") || "null");
+      const userKey = sessionUser?.email ? `shoplab_cart_${sessionUser.email}` : null;
+      const savedUser = userKey ? localStorage.getItem(userKey) : null;
+      if (savedUser) return JSON.parse(savedUser);
+      const savedGuest = localStorage.getItem("shoplab_guest_cart");
+      if (savedGuest) return JSON.parse(savedGuest);
+    } catch {}
+    return [];
+  });
+  const isCartInitialized = useRef(false);
+  const [cartOpen, setCartOpen] = useState(initialCartOpen || (typeof window !== "undefined" && window.location.pathname === "/cart"));
+  const [checkoutOpen, setCheckoutOpen] = useState(initialCheckoutOpen || (typeof window !== "undefined" && (window.location.pathname === "/checkout" || window.location.pathname === "/payment")));
+
+  useEffect(() => {
+    if (initialCheckoutOpen) {
+      setCheckoutOpen(true);
+    }
+  }, [initialCheckoutOpen]);
+
+  // Synchronously restore wishlist from localStorage to prevent loss on reload
+  const [wishlist, setWishlist] = useState(() => {
+    try {
+      const sessionUser = JSON.parse(localStorage.getItem("glowiq_session") || "null");
+      const userKey = sessionUser?.email ? `shoplab_wishlist_${sessionUser.email}` : "shoplab_guest_wishlist";
+      const saved = localStorage.getItem(userKey);
+      if (saved) return JSON.parse(saved);
+      const guestSaved = localStorage.getItem("shoplab_guest_wishlist");
+      if (guestSaved) return JSON.parse(guestSaved);
+    } catch {}
+    return [];
+  });
+  const isWishlistInitialized = useRef(false);
   const [orders, setOrders] = useState([]);
   const [toasts, setToasts] = useState([]);
   const [couponCode, setCouponCode] = useState("");
@@ -101,6 +205,78 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
   const [couponMsg, setCouponMsg] = useState("");
   const [priceUpdateMsg, setPriceUpdateMsg] = useState("");
   const toastId = useRef(0);
+
+  const navigateTo = (path) => {
+    if (typeof window !== "undefined" && window.location.pathname !== path) {
+      window.history.pushState({}, "", path);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
+  };
+
+  const openCart = () => {
+    setCartOpen(true);
+    navigateTo("/cart");
+  };
+
+  const closeCart = () => {
+    setCartOpen(false);
+    const target = view === VIEW_CAT ? "/catalogue" : (view === VIEW_ORDERS ? "/orders" : (view === VIEW_WISHLIST ? "/wishlist" : (view === VIEW_PROFILE ? "/profile" : "/")));
+    navigateTo(target);
+  };
+
+  const isInWishlist = (productId) => {
+    if (!productId) return false;
+    const pid = String(productId);
+    return wishlist.some(w => String(w.id || w.product_id) === pid);
+  };
+
+  const toggleWishlist = (product) => {
+    if (!product) return;
+    const pid = String(product.id || product.product_id);
+    const exists = isInWishlist(pid);
+    if (exists) {
+      setWishlist(prev => prev.filter(w => String(w.id || w.product_id) !== pid));
+      if (user?.email) {
+        fetch(`${API_BASE_URL}/api/wishlist/${pid}?email=${encodeURIComponent(user.email)}`, { method: "DELETE" }).catch(() => {});
+      }
+      toast("Removed from Wishlist", "info");
+    } else {
+      const itemToAdd = {
+        id: pid,
+        product_id: pid,
+        name: product.name || product.product_name || "Product",
+        product_name: product.name || product.product_name || "Product",
+        brand: product.brand || "GlowIQ",
+        category: product.category || product.product_type || "General",
+        price: parsePrice(product.price),
+        old_price: product.old_price ? parsePrice(product.old_price) : null,
+        stock: typeof product.stock === "number" ? product.stock : 20,
+        rating: product.rating ?? 4.5,
+        reviewCount: product.review_count ?? product.reviewCount ?? 12,
+        description: product.description || "",
+        img: product.img || product.image_url || product.picture_src || "",
+        image_url: product.img || product.image_url || product.picture_src || "",
+      };
+      setWishlist(prev => [itemToAdd, ...prev.filter(w => String(w.id || w.product_id) !== pid)]);
+      if (user?.email) {
+        fetch(`${API_BASE_URL}/api/wishlist`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_email: user.email, product_id: pid }),
+        }).catch(() => {});
+      }
+      toast("❤️ Saved to your Wishlist!", "success");
+    }
+  };
+
+  const removeFromWishlist = (productId) => {
+    const pid = String(productId);
+    setWishlist(prev => prev.filter(w => String(w.id || w.product_id) !== pid));
+    if (user?.email) {
+      fetch(`${API_BASE_URL}/api/wishlist/${pid}?email=${encodeURIComponent(user.email)}`, { method: "DELETE" }).catch(() => {});
+    }
+    toast("Removed from Wishlist", "info");
+  };
 
   // Sync products from backend if server is active
   useEffect(() => {
@@ -120,7 +296,9 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
             description: p.description || "",
             rating: p.rating ?? 4.5,
             reviewCount: p.review_count ?? 10,
-            img: p.image_url || p.img || "",
+            img: p.image_url || p.img || p.picture_src || "",
+            skintype: p.skintype || "",
+            notableEffects: p.notable_effects || "",
           })));
         }
       })
@@ -129,12 +307,15 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
 
   // REQ-CART-04: Guest cart persistence and customer cart merge
   useEffect(() => {
-    const savedGuest = localStorage.getItem("shoplab_guest_cart");
     const userKey = user ? `shoplab_cart_${user.email}` : null;
     const savedUser = userKey ? localStorage.getItem(userKey) : null;
+    const savedGuest = localStorage.getItem("shoplab_guest_cart");
 
     if (user) {
-      let merged = savedUser ? JSON.parse(savedUser) : [];
+      let merged = [];
+      try {
+        if (savedUser) merged = JSON.parse(savedUser);
+      } catch {}
       if (savedGuest) {
         try {
           const guestItems = JSON.parse(savedGuest);
@@ -150,20 +331,27 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
         } catch {}
       }
       setCart(merged);
+      try {
+        localStorage.setItem(`shoplab_cart_${user.email}`, JSON.stringify(merged));
+      } catch {}
     } else if (savedGuest) {
       try {
         setCart(JSON.parse(savedGuest));
       } catch {}
     }
+    isCartInitialized.current = true;
   }, [user]);
 
-  // Save cart changes
+  // Save cart changes (only after initial load has finished)
   useEffect(() => {
-    if (user) {
-      localStorage.setItem(`shoplab_cart_${user.email}`, JSON.stringify(cart));
-    } else {
-      localStorage.setItem("shoplab_guest_cart", JSON.stringify(cart));
-    }
+    if (!isCartInitialized.current) return;
+    try {
+      if (user) {
+        localStorage.setItem(`shoplab_cart_${user.email}`, JSON.stringify(cart));
+      } else {
+        localStorage.setItem("shoplab_guest_cart", JSON.stringify(cart));
+      }
+    } catch {}
   }, [cart, user]);
 
   // REQ-CART-05: Price change notification
@@ -193,15 +381,161 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
     }
   }, [user, view]);
 
-  // Load wishlist if logged in
+  // REQ-WSH-01: Load and merge wishlist on user login or change
   useEffect(() => {
+    const userKey = user?.email ? `shoplab_wishlist_${user.email}` : null;
+    const savedUser = userKey ? localStorage.getItem(userKey) : null;
+    const savedGuest = localStorage.getItem("shoplab_guest_wishlist");
+
     if (user?.email) {
+      let localItems = [];
+      try {
+        if (savedUser) localItems = JSON.parse(savedUser);
+      } catch {}
+
+      if (savedGuest) {
+        try {
+          const guestList = JSON.parse(savedGuest);
+          if (Array.isArray(guestList)) {
+            guestList.forEach(g => {
+              const gPid = String(g.id || g.product_id);
+              if (!localItems.some(x => String(x.id || x.product_id) === gPid)) {
+                localItems.push(g);
+                fetch(`${API_BASE_URL}/api/wishlist`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ user_email: user.email, product_id: gPid }),
+                }).catch(() => {});
+              }
+            });
+            localStorage.removeItem("shoplab_guest_wishlist");
+          }
+        } catch {}
+      }
+
       fetch(`${API_BASE_URL}/api/wishlist?email=${encodeURIComponent(user.email)}`)
         .then(r => r.json())
-        .then(d => { setWishlist(d.wishlist || []); })
-        .catch(() => {});
+        .then(d => {
+          if (d.ok && Array.isArray(d.wishlist)) {
+            const backendMap = new Map(d.wishlist.map(w => [String(w.id || w.product_id), w]));
+            localItems.forEach(item => {
+              const k = String(item.id || item.product_id);
+              if (!backendMap.has(k)) {
+                backendMap.set(k, item);
+                fetch(`${API_BASE_URL}/api/wishlist`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ user_email: user.email, product_id: k }),
+                }).catch(() => {});
+              }
+            });
+            const merged = Array.from(backendMap.values());
+            setWishlist(merged);
+            try {
+              localStorage.setItem(`shoplab_wishlist_${user.email}`, JSON.stringify(merged));
+            } catch {}
+          } else if (localItems.length > 0) {
+            setWishlist(localItems);
+          }
+        })
+        .catch(() => {
+          if (localItems.length > 0) setWishlist(localItems);
+        });
+    } else if (savedGuest) {
+      try {
+        setWishlist(JSON.parse(savedGuest));
+      } catch {}
     }
+    isWishlistInitialized.current = true;
   }, [user]);
+
+  // Persist wishlist changes to localStorage
+  useEffect(() => {
+    if (!isWishlistInitialized.current) return;
+    try {
+      if (user?.email) {
+        localStorage.setItem(`shoplab_wishlist_${user.email}`, JSON.stringify(wishlist));
+      } else {
+        localStorage.setItem("shoplab_guest_wishlist", JSON.stringify(wishlist));
+      }
+    } catch {}
+  }, [wishlist, user]);
+
+  // Handle URL route synchronization on popstate
+  useEffect(() => {
+    const onPop = () => {
+      const p = window.location.pathname;
+      if (p.startsWith("/product/")) {
+        const pid = decodeURIComponent(p.replace("/product/", "").split("/")[0]);
+        const found = products.find(x => String(x.id || x.product_id) === pid);
+        if (found) setSelectedProduct(found);
+        setCheckoutOpen(false);
+      } else if (p === "/checkout" || p === "/payment") {
+        setCheckoutOpen(true);
+        setSelectedProduct(null);
+      } else if (p === "/wishlist") {
+        setView(VIEW_WISHLIST);
+        setSelectedProduct(null);
+        setCheckoutOpen(false);
+      } else if (p === "/orders") {
+        setView(VIEW_ORDERS);
+        setSelectedProduct(null);
+        setCheckoutOpen(false);
+      } else if (p === "/profile") {
+        setView(VIEW_PROFILE);
+        setSelectedProduct(null);
+        setCheckoutOpen(false);
+      } else if (p === "/catalogue" || p === "/products") {
+        setView(VIEW_CAT);
+        setSelectedProduct(null);
+        setCheckoutOpen(false);
+      } else if (p === "/" || p === "/home") {
+        setView(VIEW_HOME);
+        setSelectedProduct(null);
+        setCheckoutOpen(false);
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [products]);
+
+  // Direct product URL route sync & lookup
+  useEffect(() => {
+    const p = window.location.pathname;
+    if (p.startsWith("/product/")) {
+      const pid = decodeURIComponent(p.replace("/product/", "").split("/")[0]);
+      if (pid && (!selectedProduct || String(selectedProduct.id) !== pid)) {
+        const found = products.find(x => String(x.id || x.product_id) === pid);
+        if (found) {
+          setSelectedProduct(found);
+        } else {
+          fetch(`${API_BASE_URL}/api/products/${pid}`)
+            .then(r => r.json())
+            .then(d => {
+              const prod = d.product || d;
+              if (prod && (prod.id || prod.product_id || prod.name)) {
+                setSelectedProduct({
+                  id: String(prod.id || prod.product_id || pid),
+                  name: (prod.name || prod.product_name || "Product").trim(),
+                  brand: (prod.brand || "ShopLab").trim(),
+                  category: (prod.category || prod.product_type || "General").trim(),
+                  price: parsePrice(prod.price),
+                  old_price: prod.old_price ? parsePrice(prod.old_price) : null,
+                  stock: typeof prod.stock === "number" ? prod.stock : 20,
+                  description: prod.description || "",
+                  rating: prod.rating ?? 4.5,
+                  reviewCount: prod.review_count ?? 12,
+                  img: prod.image_url || prod.img || "",
+                  skintype: prod.skintype || "",
+                  notableEffects: prod.notable_effects || "",
+                });
+              }
+            })
+            .catch(() => {});
+        }
+      }
+    }
+  }, [products]);
 
   const toast = (msg, type = "success") => {
     const id = ++toastId.current;
@@ -213,25 +547,83 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     let list = products.filter(p => {
-      const matchSearch = !q || p.name.toLowerCase().includes(q) || p.brand.toLowerCase().includes(q) || p.category.toLowerCase().includes(q);
-      const matchCat = categoryFilter === "All" || p.category.toLowerCase() === categoryFilter.toLowerCase();
-      const matchMinPrice = minPrice === "" || p.price >= parseFloat(minPrice);
-      const matchMaxPrice = maxPrice === "" || p.price <= parseFloat(maxPrice);
-      const matchRating = !minRating4 || (p.rating >= 4.0);
-      const matchStock = !inStockOnly || (p.stock > 0);
+      const matchSearch = !q ||
+        p.name.toLowerCase().includes(q) ||
+        p.brand.toLowerCase().includes(q) ||
+        p.category.toLowerCase().includes(q) ||
+        (p.skintype && p.skintype.toLowerCase().includes(q)) ||
+        (p.notableEffects && p.notableEffects.toLowerCase().includes(q));
+
+      const isSkinCategory = ["serum", "toner", "moisturizer", "sunscreen", "face wash", "skincare"].includes(p.category.toLowerCase());
+      const matchCat = appliedCategoryFilter === "All" ||
+        p.category.toLowerCase() === appliedCategoryFilter.toLowerCase() ||
+        (appliedCategoryFilter.toLowerCase() === "skincare" && isSkinCategory);
+
+      const matchMinPrice = appliedMinPrice === "" || p.price >= parseFloat(appliedMinPrice);
+      const matchMaxPrice = appliedMaxPrice === "" || p.price <= parseFloat(appliedMaxPrice);
+      const matchRating = !appliedMinRating4 || (p.rating >= 4.0);
+      const matchStock = !appliedInStockOnly || (p.stock > 0);
       return matchSearch && matchCat && matchMinPrice && matchMaxPrice && matchRating && matchStock;
     });
 
     if (sortBy === "price_asc") list = [...list].sort((a, b) => a.price - b.price);
     else if (sortBy === "price_desc") list = [...list].sort((a, b) => b.price - a.price);
     else if (sortBy === "rating_desc") list = [...list].sort((a, b) => b.rating - a.rating);
-    else if (sortBy === "newest") list = [...list].sort((a, b) => Number(b.id) - Number(a.id));
+    else if (sortBy === "newest") list = [...list].sort((a, b) => String(b.id).localeCompare(String(a.id)));
 
     return list;
-  }, [products, search, categoryFilter, minPrice, maxPrice, minRating4, inStockOnly, sortBy]);
+  }, [products, search, appliedCategoryFilter, appliedMinPrice, appliedMaxPrice, appliedMinRating4, appliedInStockOnly, sortBy]);
+
+  const categoriesList = useMemo(() => {
+    const base = ["All", "Skincare", "Face Wash", "Toner", "Serum", "Moisturizer", "Sunscreen", "Electronics", "Accessories", "Audio"];
+    const set = new Set(base);
+    products.forEach(p => {
+      if (p.category && !set.has(p.category)) set.add(p.category);
+    });
+    return Array.from(set);
+  }, [products]);
 
   const totalPages = Math.ceil(filtered.length / PER_PAGE);
   const paginated = filtered.slice((page - 1) * PER_PAGE, page * PER_PAGE);
+
+  // Problem 1: Apply Filters handler
+  const handleApplyFilters = () => {
+    setAppliedCategoryFilter(draftCategory);
+    setAppliedMinPrice(draftMinPrice);
+    setAppliedMaxPrice(draftMaxPrice);
+    setAppliedMinRating4(draftMinRating4);
+    setAppliedInStockOnly(draftInStockOnly);
+    setPage(1);
+  };
+
+  // Problem 1: Clear Filters handler
+  const handleClearFilters = () => {
+    setDraftCategory("All");
+    setDraftMinPrice("");
+    setDraftMaxPrice("");
+    setDraftMinRating4(false);
+    setDraftInStockOnly(false);
+    setAppliedCategoryFilter("All");
+    setAppliedMinPrice("");
+    setAppliedMaxPrice("");
+    setAppliedMinRating4(false);
+    setAppliedInStockOnly(false);
+    setPage(1);
+  };
+
+  // Problem 2: Pagination windowing helper
+  const getPageNumbers = () => {
+    if (totalPages <= 7) {
+      return Array.from({ length: totalPages }, (_, i) => i + 1);
+    }
+    if (page <= 4) {
+      return [1, 2, 3, 4, 5, "...", totalPages];
+    }
+    if (page >= totalPages - 3) {
+      return [1, "...", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+    }
+    return [1, "...", page - 1, page, page + 1, "...", totalPages];
+  };
 
   // REQ-CART-01, REQ-CART-02 Add to Cart
   const addToCart = (product, addQty = 1) => {
@@ -283,8 +675,8 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
   const cartDiscount = appliedCoupon ? appliedCoupon.discount : 0;
   let cartShipping = (cartSubtotal - cartDiscount) >= 100.00 || appliedCoupon?.code === "FREESHIP" ? 0.00 : 5.99;
   const taxableBase = Math.max(0, cartSubtotal - cartDiscount + cartShipping);
-  const cartTax = Math.round(taxableBase * 0.08 * 100) / 100;
-  const cartTotal = Math.round((cartSubtotal - cartDiscount + cartShipping + cartTax) * 100) / 100;
+  const cartTax = Math.round(taxableBase * 0.18 * 100) / 100;
+  const cartTotal = Math.round((cartSubtotal - cartDiscount + (cartShipping * 2) + cartTax) * 100) / 100;
 
   const handleApplyCoupon = async () => {
     const code = couponCode.trim().toUpperCase();
@@ -322,6 +714,7 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
       toast("Your cart is empty", "error");
       return;
     }
+    setSelectedProduct(null);
     if (!user) {
       // Guest is sent to login and comes back to checkout
       onRequestLogin?.(true);
@@ -329,6 +722,7 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
     }
     setCartOpen(false);
     setCheckoutOpen(true);
+    navigateTo("/checkout");
   };
 
   // REQ-ORD-02: Cancel order while placed
@@ -352,25 +746,31 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
   // REQ-WSH-01: Wishlist Move to Cart
   const handleMoveToCart = (item) => {
     addToCart(item);
-    setWishlist(prev => prev.filter(w => w.id !== item.id && w.product_id !== item.id));
-    if (user?.email) {
-      fetch(`${API_BASE_URL}/api/wishlist/${item.id}?email=${encodeURIComponent(user.email)}`, { method: "DELETE" }).catch(() => {});
-    }
+    removeFromWishlist(item.id);
     toast("Moved item to cart!");
   };
 
-  if (selectedProduct) {
+  if (selectedProduct && !checkoutOpen) {
     return (
       <ProductDetailPage
         product={selectedProduct}
-        onBack={() => setSelectedProduct(null)}
+        onBack={() => {
+          setSelectedProduct(null);
+          navigateTo(view === VIEW_CAT ? "/catalogue" : "/");
+        }}
         onAddToCart={(p) => addToCart(p, p.qty || 1)}
         onBuyNow={(p) => {
+          setSelectedProduct(null);
           addToCart(p, p.qty || 1);
           if (!user) onRequestLogin?.(true);
-          else setCheckoutOpen(true);
+          else {
+            setCheckoutOpen(true);
+            navigateTo("/checkout");
+          }
         }}
         user={user}
+        isInWishlist={isInWishlist(selectedProduct.id)}
+        onToggleWishlist={() => toggleWishlist(selectedProduct)}
       />
     );
   }
@@ -382,25 +782,25 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
         onBack={() => {
           setCheckoutOpen(false);
           onCheckoutHandled?.();
+          navigateTo("/");
         }}
         onComplete={(newOrder) => {
           setCart([]);
           setCheckoutOpen(false);
           onCheckoutHandled?.();
           setView(VIEW_ORDERS);
+          navigateTo("/orders");
           if (newOrder) setOrders(prev => [newOrder, ...prev]);
         }}
       />
     );
   }
 
-  const categoriesList = ["All", "Electronics", "Accessories", "Audio", "Skincare"];
-
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.text }}>
       {/* ── HEADER ── */}
       <header style={{ position: "sticky", top: 0, zIndex: 100, background: T.surface, borderBottom: `1.5px solid ${T.border}`, padding: "0 2rem", height: 64, display: "flex", alignItems: "center", gap: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => setView(VIEW_HOME)}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => { setView(VIEW_HOME); setSelectedProduct(null); setCheckoutOpen(false); navigateTo("/"); }}>
           <div style={{ width: 34, height: 34, borderRadius: 10, background: T.accentGrad, display: "flex", alignItems: "center", justifyContent: "center" }}>
             <span style={{ fontSize: 18 }}>✨</span>
           </div>
@@ -412,24 +812,31 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
 
         <nav style={{ display: "flex", gap: 4, marginLeft: 16 }}>
           {[
-            { label: "Home", v: VIEW_HOME, testId: "nav-home" },
-            { label: "Catalogue", v: VIEW_CAT, testId: "nav-catalogue" },
+            { label: "Home", v: VIEW_HOME, path: "/", testId: "nav-home" },
+            { label: "Catalogue", v: VIEW_CAT, path: "/catalogue", testId: "nav-catalogue" },
             ...(user ? [
-              { label: "My Orders", v: VIEW_ORDERS, testId: "nav-orders" },
-              { label: "Wishlist", v: VIEW_WISHLIST, testId: "nav-wishlist" },
-              { label: "Profile", v: VIEW_PROFILE, testId: "nav-profile" }
-            ] : [])
-          ].map(({ label, v, testId }) => (
+              { label: "My Orders", v: VIEW_ORDERS, path: "/orders", testId: "nav-orders" },
+              { label: "Wishlist", v: VIEW_WISHLIST, path: "/wishlist", testId: "nav-wishlist" },
+              { label: "Profile", v: VIEW_PROFILE, path: "/profile", testId: "nav-profile" }
+            ] : [
+              { label: "Wishlist", v: VIEW_WISHLIST, path: "/wishlist", testId: "nav-wishlist" }
+            ])
+          ].map(({ label, v, path, testId }) => (
             <button
               key={v}
               data-testid={testId}
-              onClick={() => setView(v)}
+              onClick={() => {
+                setView(v);
+                setSelectedProduct(null);
+                setCheckoutOpen(false);
+                navigateTo(path);
+              }}
               style={{
                 background: "none", border: "none",
-                color: view === v ? T.accent : T.textMid,
-                fontWeight: view === v ? 700 : 500, fontSize: "0.85rem", cursor: "pointer",
+                color: (view === v && !selectedProduct) ? T.accent : T.textMid,
+                fontWeight: (view === v && !selectedProduct) ? 700 : 500, fontSize: "0.85rem", cursor: "pointer",
                 padding: "6px 12px", borderRadius: 8,
-                borderBottom: view === v ? `2px solid ${T.accent}` : "2px solid transparent",
+                borderBottom: (view === v && !selectedProduct) ? `2px solid ${T.accent}` : "2px solid transparent",
               }}
             >
               {label}
@@ -486,7 +893,7 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
           <button
             className="sf-btn"
             data-testid="cart-toggle-btn"
-            onClick={() => setCartOpen(!cartOpen)}
+            onClick={() => (cartOpen ? closeCart() : openCart())}
             style={{
               background: cartBadgeCount > 0 ? T.accentSoft : T.surface,
               border: `1.5px solid ${cartBadgeCount > 0 ? T.accent : T.border}`,
@@ -513,13 +920,13 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
       {/* ── CART DRAWER ── */}
       {cartOpen && (
         <div style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", justifyContent: "flex-end" }}>
-          <div style={{ flex: 1, background: "rgba(0,0,0,0.3)" }} onClick={() => setCartOpen(false)} />
+          <div style={{ flex: 1, background: "rgba(0,0,0,0.3)" }} onClick={closeCart} />
           <div style={{ width: 380, background: T.surface, borderLeft: `1.5px solid ${T.border}`, display: "flex", flexDirection: "column", height: "100vh" }}>
             <div style={{ padding: "16px 20px", borderBottom: `1.5px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <h3 style={{ margin: 0, fontWeight: 700, fontFamily: "'Playfair Display', serif" }}>
                 Shopping Cart ({cartBadgeCount})
               </h3>
-              <button onClick={() => setCartOpen(false)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: T.textSoft }}>✕</button>
+              <button onClick={closeCart} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: T.textSoft }}>✕</button>
             </div>
 
             {cart.length === 0 ? (
@@ -629,15 +1036,20 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
           <div style={{ padding: "2.5rem 2rem", maxWidth: 1100, margin: "0 auto" }}>
             <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: "1.4rem", fontWeight: 700, marginBottom: 18 }}>Categories</h2>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14 }}>
-              {["Electronics", "Accessories", "Audio", "Skincare"].map(cat => (
+              {["Skincare", "Face Wash", "Serum", "Moisturizer", "Sunscreen", "Electronics", "Accessories", "Audio"].map(cat => (
                 <div
                   key={cat}
                   className="sf-card"
-                  onClick={() => { setCategoryFilter(cat); setView(VIEW_CAT); }}
+                  onClick={() => {
+                    setDraftCategory(cat);
+                    setAppliedCategoryFilter(cat);
+                    setPage(1);
+                    setView(VIEW_CAT);
+                  }}
                   style={{ background: T.card, border: `1.5px solid ${T.border}`, borderRadius: 14, padding: "20px", textAlign: "center", cursor: "pointer" }}
                 >
                   <div style={{ fontSize: 32, marginBottom: 8 }}>
-                    {cat === "Electronics" ? "💻" : cat === "Accessories" ? "🔌" : cat === "Audio" ? "🎧" : "🧴"}
+                    {cat === "Electronics" ? "💻" : cat === "Accessories" ? "🔌" : cat === "Audio" ? "🎧" : cat === "Face Wash" ? "🧼" : cat === "Serum" ? "💧" : cat === "Moisturizer" ? "🧴" : cat === "Sunscreen" ? "☀️" : "✨"}
                   </div>
                   <div style={{ fontWeight: 700, fontSize: "1rem" }}>{cat}</div>
                 </div>
@@ -650,7 +1062,18 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
             <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: "1.4rem", fontWeight: 700, marginBottom: 18 }}>Featured Products</h2>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
               {products.slice(0, 4).map(p => (
-                <ProductCardItem key={p.id} p={p} T={T} onSelect={setSelectedProduct} onAddToCart={addToCart} />
+                <ProductCardItem
+                  key={p.id}
+                  p={p}
+                  T={T}
+                  onSelect={(prod) => {
+                    setSelectedProduct(prod);
+                    navigateTo(`/product/${prod.id}`);
+                  }}
+                  onAddToCart={addToCart}
+                  isInWishlist={isInWishlist(p.id)}
+                  onToggleWishlist={toggleWishlist}
+                />
               ))}
             </div>
           </div>
@@ -665,14 +1088,8 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
               <h3 style={{ margin: 0, fontSize: "1rem", fontWeight: 700 }}>Filters</h3>
               <button
-                onClick={() => {
-                  setCategoryFilter("All");
-                  setMinPrice("");
-                  setMaxPrice("");
-                  setMinRating4(false);
-                  setInStockOnly(false);
-                  setPage(1);
-                }}
+                data-testid="clear-filters-link"
+                onClick={handleClearFilters}
                 style={{ background: "none", border: "none", color: T.accent, fontSize: "0.75rem", fontWeight: 600, cursor: "pointer" }}
               >
                 Reset
@@ -686,13 +1103,14 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
                 {categoriesList.map(c => (
                   <button
                     key={c}
-                    onClick={() => { setCategoryFilter(c); setPage(1); }}
+                    data-testid={`category-filter-${c.toLowerCase()}`}
+                    onClick={() => setDraftCategory(c)}
                     style={{
                       textAlign: "left", padding: "6px 10px", borderRadius: 8,
-                      border: `1px solid ${categoryFilter === c ? T.accent : "transparent"}`,
-                      background: categoryFilter === c ? T.accentSoft : "none",
-                      color: categoryFilter === c ? T.accent : T.text,
-                      fontSize: "0.82rem", fontWeight: categoryFilter === c ? 700 : 500, cursor: "pointer",
+                      border: `1px solid ${draftCategory === c ? T.accent : "transparent"}`,
+                      background: draftCategory === c ? T.accentSoft : "none",
+                      color: draftCategory === c ? T.accent : T.text,
+                      fontSize: "0.82rem", fontWeight: draftCategory === c ? 700 : 500, cursor: "pointer",
                     }}
                   >
                     {c}
@@ -707,16 +1125,18 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
               <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
                 <input
                   type="number"
+                  data-testid="min-price-input"
                   placeholder="Min"
-                  value={minPrice}
-                  onChange={e => { setMinPrice(e.target.value); setPage(1); }}
+                  value={draftMinPrice}
+                  onChange={e => setDraftMinPrice(e.target.value)}
                   style={{ width: "50%", padding: "6px 8px", borderRadius: 6, border: `1px solid ${T.border}`, fontSize: "0.8rem" }}
                 />
                 <input
                   type="number"
+                  data-testid="max-price-input"
                   placeholder="Max"
-                  value={maxPrice}
-                  onChange={e => { setMaxPrice(e.target.value); setPage(1); }}
+                  value={draftMaxPrice}
+                  onChange={e => setDraftMaxPrice(e.target.value)}
                   style={{ width: "50%", padding: "6px 8px", borderRadius: 6, border: `1px solid ${T.border}`, fontSize: "0.8rem" }}
                 />
               </div>
@@ -728,24 +1148,52 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
                 <input
                   type="checkbox"
                   data-testid="rating-4-filter"
-                  checked={minRating4}
-                  onChange={e => { setMinRating4(e.target.checked); setPage(1); }}
+                  checked={draftMinRating4}
+                  onChange={e => setDraftMinRating4(e.target.checked)}
                 />
                 <span>4★ & above</span>
               </label>
             </div>
 
             {/* In stock only Filter (REQ-CAT-03) */}
-            <div style={{ marginBottom: 18 }}>
+            <div style={{ marginBottom: 20 }}>
               <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.82rem", cursor: "pointer" }}>
                 <input
                   type="checkbox"
                   data-testid="in-stock-only"
-                  checked={inStockOnly}
-                  onChange={e => { setInStockOnly(e.target.checked); setPage(1); }}
+                  checked={draftInStockOnly}
+                  onChange={e => setDraftInStockOnly(e.target.checked)}
                 />
                 <span>In stock only</span>
               </label>
+            </div>
+
+            {/* Problem 1: Apply Filters and Clear Filters buttons */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <button
+                className="sf-btn"
+                data-testid="apply-filters-btn"
+                onClick={handleApplyFilters}
+                style={{
+                  width: "100%", padding: "10px", borderRadius: 8, border: "none",
+                  background: T.accentGrad, color: "#fff", fontWeight: 700,
+                  fontSize: "0.85rem", cursor: "pointer", display: "flex",
+                  alignItems: "center", justifyContent: "center", gap: 6,
+                }}
+              >
+                <span>✓</span> Apply Filters
+              </button>
+              <button
+                data-testid="clear-filters-btn"
+                onClick={handleClearFilters}
+                style={{
+                  width: "100%", padding: "8px", borderRadius: 8,
+                  border: `1px solid ${T.border}`, background: T.surface,
+                  color: T.textMid, fontWeight: 600, fontSize: "0.8rem", cursor: "pointer",
+                }}
+              >
+                Clear Filters
+              </button>
             </div>
           </aside>
 
@@ -787,40 +1235,75 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16, flex: 1 }}>
                 {paginated.map(p => (
-                  <ProductCardItem key={p.id} p={p} T={T} onSelect={setSelectedProduct} onAddToCart={addToCart} />
+                  <ProductCardItem
+                    key={p.id}
+                    p={p}
+                    T={T}
+                    onSelect={(prod) => {
+                      setSelectedProduct(prod);
+                      navigateTo(`/product/${prod.id}`);
+                    }}
+                    onAddToCart={addToCart}
+                    isInWishlist={isInWishlist(p.id)}
+                    onToggleWishlist={toggleWishlist}
+                  />
                 ))}
               </div>
             )}
 
             {/* Pagination Controls (REQ-CAT-01: 12 per page) */}
             {totalPages > 1 && (
-              <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 24, paddingBottom: 16 }}>
+              <div data-testid="pagination-controls" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 24, paddingBottom: 16, flexWrap: "wrap" }}>
                 <button
-                  disabled={page === 1}
-                  onClick={() => setPage(p => p - 1)}
-                  style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, cursor: page === 1 ? "not-allowed" : "pointer" }}
+                  data-testid="pagination-prev"
+                  disabled={page <= 1}
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  style={{
+                    padding: "6px 14px", borderRadius: 8,
+                    border: `1.5px solid ${page <= 1 ? T.border : T.borderStrong}`,
+                    background: T.surface,
+                    color: page <= 1 ? T.textSoft : T.text,
+                    cursor: page <= 1 ? "not-allowed" : "pointer",
+                    fontWeight: 600, fontSize: "0.82rem",
+                  }}
                 >
                   ← Prev
                 </button>
-                {Array.from({ length: totalPages }, (_, i) => i + 1).map(pg => (
-                  <button
-                    key={pg}
-                    onClick={() => setPage(pg)}
-                    style={{
-                      padding: "6px 12px", borderRadius: 8, minWidth: 34,
-                      border: `1.5px solid ${pg === page ? T.accent : T.border}`,
-                      background: pg === page ? T.accentSoft : T.surface,
-                      color: pg === page ? T.accent : T.text, fontWeight: pg === page ? 700 : 500,
-                      cursor: "pointer",
-                    }}
-                  >
-                    {pg}
-                  </button>
+
+                {getPageNumbers().map((pg, idx) => (
+                  pg === "..." ? (
+                    <span key={`ellipsis-${idx}`} style={{ padding: "0 6px", color: T.textSoft }}>…</span>
+                  ) : (
+                    <button
+                      key={pg}
+                      data-testid={`page-button-${pg}`}
+                      onClick={() => setPage(pg)}
+                      style={{
+                        padding: "6px 12px", minWidth: 36, height: 34, borderRadius: 8,
+                        border: `1.5px solid ${pg === page ? T.accent : T.border}`,
+                        background: pg === page ? T.accentSoft : T.surface,
+                        color: pg === page ? T.accent : T.text,
+                        fontWeight: pg === page ? 700 : 500,
+                        cursor: "pointer", fontSize: "0.82rem",
+                      }}
+                    >
+                      {pg}
+                    </button>
+                  )
                 ))}
+
                 <button
-                  disabled={page === totalPages}
-                  onClick={() => setPage(p => p + 1)}
-                  style={{ padding: "6px 12px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, cursor: page === totalPages ? "not-allowed" : "pointer" }}
+                  data-testid="pagination-next"
+                  disabled={page >= totalPages || totalPages === 0}
+                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  style={{
+                    padding: "6px 14px", borderRadius: 8,
+                    border: `1.5px solid ${(page >= totalPages || totalPages === 0) ? T.border : T.borderStrong}`,
+                    background: T.surface,
+                    color: (page >= totalPages || totalPages === 0) ? T.textSoft : T.text,
+                    cursor: (page >= totalPages || totalPages === 0) ? "not-allowed" : "pointer",
+                    fontWeight: 600, fontSize: "0.82rem",
+                  }}
                 >
                   Next →
                 </button>
@@ -909,12 +1392,59 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
             <div style={{ textAlign: "center", padding: "4rem", background: T.surface, borderRadius: 16, border: `1.5px solid ${T.border}` }}>
               <div style={{ fontSize: 36, marginBottom: 10 }}>❤️</div>
               <p style={{ color: T.textSoft }}>Your wishlist is empty.</p>
+              <button
+                onClick={() => {
+                  setView(VIEW_CAT);
+                  setSelectedProduct(null);
+                  navigateTo("/catalogue");
+                }}
+                style={{
+                  marginTop: 14, padding: "8px 18px", borderRadius: 8,
+                  background: T.accentGrad, color: "#fff", border: "none",
+                  fontWeight: 700, fontSize: "0.85rem", cursor: "pointer"
+                }}
+              >
+                Browse Catalogue
+              </button>
             </div>
           ) : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 16 }}>
               {wishlist.map(item => (
                 <div key={item.id} style={{ background: T.card, borderRadius: 14, border: `1.5px solid ${T.border}`, padding: "14px", display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontWeight: 700, fontSize: "0.9rem" }}>{item.name}</div>
+                  <div
+                    onClick={() => {
+                      setSelectedProduct(item);
+                      navigateTo(`/product/${item.id}`);
+                    }}
+                    style={{
+                      height: 140, borderRadius: 8, overflow: "hidden", background: T.accentSoft,
+                      display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer"
+                    }}
+                  >
+                    <img
+                      src={item.img || item.image_url || FALLBACK_PRODUCT_IMAGE}
+                      alt={item.name}
+                      style={{ width: "100%", height: "100%", objectFit: "contain", padding: 4 }}
+                      onError={e => {
+                        if (e.currentTarget.src !== FALLBACK_PRODUCT_IMAGE) {
+                          e.currentTarget.onerror = null;
+                          e.currentTarget.src = FALLBACK_PRODUCT_IMAGE;
+                        }
+                      }}
+                    />
+                  </div>
+                  <div style={{ fontSize: "0.72rem", color: T.textSoft, textTransform: "uppercase", fontWeight: 600 }}>
+                    {item.brand || "GlowIQ"}
+                  </div>
+                  <div
+                    onClick={() => {
+                      setSelectedProduct(item);
+                      navigateTo(`/product/${item.id}`);
+                    }}
+                    style={{ fontWeight: 700, fontSize: "0.9rem", color: T.text, cursor: "pointer" }}
+                  >
+                    {item.name}
+                  </div>
                   <div style={{ color: T.accent, fontWeight: 800 }}>{fmtPrice(item.price)}</div>
                   <div style={{ display: "flex", gap: 8, marginTop: "auto" }}>
                     <button
@@ -926,11 +1456,9 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
                     </button>
                     <button
                       data-testid="remove-from-wishlist-btn"
-                      onClick={() => {
-                        setWishlist(prev => prev.filter(w => w.id !== item.id));
-                        if (user?.email) fetch(`${API_BASE_URL}/api/wishlist/${item.id}?email=${encodeURIComponent(user.email)}`, { method: "DELETE" }).catch(() => {});
-                      }}
-                      style={{ padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.border}`, background: "none", color: T.danger, cursor: "pointer" }}
+                      title="Remove from Wishlist"
+                      onClick={() => removeFromWishlist(item.id)}
+                      style={{ padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.border}`, background: "none", color: T.danger, cursor: "pointer", fontWeight: 700 }}
                     >
                       ✕
                     </button>
@@ -960,21 +1488,11 @@ export default function StoreFront({ onRequestLogin, initialCheckoutOpen = false
 }
 
 // ── Product Card Component (REQ-CAT-05 & Section 7) ───────────────────────────
-function ProductCardItem({ p, T, onSelect, onAddToCart }) {
+function ProductCardItem({ p, T, onSelect, onAddToCart, isInWishlist = false, onToggleWishlist }) {
   const isOutOfStock = p.stock <= 0;
-  let stockBadge = "In stock";
-  let stockColor = T.success;
-
-  if (p.stock > 5) {
-    stockBadge = "In stock";
-    stockColor = T.success;
-  } else if (p.stock >= 1) {
-    stockBadge = `Only ${p.stock} left`;
-    stockColor = T.warning;
-  } else {
-    stockBadge = "Out of stock";
-    stockColor = T.danger;
-  }
+  const isLowStock = p.stock > 0 && p.stock <= 5;
+  const stockBadge = isOutOfStock ? "Out of stock" : isLowStock ? `Only ${p.stock} left` : "In stock";
+  const stockColor = isOutOfStock ? T.danger : isLowStock ? T.warning : T.success;
 
   return (
     <div
@@ -983,38 +1501,131 @@ function ProductCardItem({ p, T, onSelect, onAddToCart }) {
       data-product-id={p.id}
       onClick={() => onSelect?.(p)}
       style={{
-        background: T.card, borderRadius: 14, border: `1.5px solid ${T.border}`,
-        padding: "14px", display: "flex", flexDirection: "column", gap: 8,
-        cursor: "pointer", position: "relative",
+        background: T.card,
+        borderRadius: 12,
+        border: `1.5px solid ${T.border}`,
+        padding: "12px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        cursor: "pointer",
+        position: "relative",
+        height: "100%",
+        boxSizing: "border-box",
       }}
     >
-      <div style={{ height: 130, borderRadius: 10, overflow: "hidden", background: T.accentSoft, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        {p.img ? (
-          <img src={p.img} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { e.target.style.display = "none"; }} />
-        ) : (
-          <span style={{ fontSize: 36 }}>🛍️</span>
-        )}
+      {/* Product Image Container with consistent height */}
+      <div style={{
+        height: 140,
+        borderRadius: 8,
+        overflow: "hidden",
+        background: T.accentSoft,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        position: "relative",
+      }}>
+        <img
+          src={p.img || FALLBACK_PRODUCT_IMAGE}
+          alt={p.name}
+          style={{ width: "100%", height: "100%", objectFit: "contain", padding: 4 }}
+          onError={e => {
+            if (e.currentTarget.src !== FALLBACK_PRODUCT_IMAGE) {
+              e.currentTarget.onerror = null;
+              e.currentTarget.src = FALLBACK_PRODUCT_IMAGE;
+            }
+          }}
+        />
+
+        {/* Wishlist Heart Toggle Button */}
+        <button
+          type="button"
+          data-testid="card-wishlist-btn"
+          title={isInWishlist ? "In Wishlist (click to remove)" : "Add to Wishlist"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleWishlist?.(p);
+          }}
+          style={{
+            position: "absolute",
+            top: 6,
+            right: 6,
+            width: 28,
+            height: 28,
+            borderRadius: "50%",
+            background: "rgba(255, 255, 255, 0.92)",
+            border: `1px solid ${isInWishlist ? T.accent : T.border}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+            boxShadow: "0 2px 6px rgba(0,0,0,0.1)",
+            zIndex: 2,
+            lineHeight: 1,
+            padding: 0,
+          }}
+        >
+          {isInWishlist ? "❤️" : "🤍"}
+        </button>
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontSize: "0.72rem", color: T.textSoft, textTransform: "uppercase" }}>{p.brand}</span>
-        <span style={{ fontSize: "0.72rem", color: stockColor, fontWeight: 700 }}>{stockBadge}</span>
+      {/* Brand & Stock Status */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
+        <span style={{ fontSize: "0.72rem", color: T.textSoft, textTransform: "uppercase", fontWeight: 600, letterSpacing: "0.5px" }}>
+          {p.brand || "ShopLab"}
+        </span>
+        <span style={{ fontSize: "0.72rem", color: stockColor, fontWeight: 700 }}>
+          {stockBadge}
+        </span>
       </div>
 
-      <div data-testid="product-name" style={{ fontWeight: 600, fontSize: "0.88rem", lineHeight: 1.3, flex: 1, color: T.text }}>
+      {/* Product Name (Clamped to 2 lines to remove excessive empty space) */}
+      <div
+        data-testid="product-name"
+        title={p.name}
+        style={{
+          fontWeight: 600,
+          fontSize: "0.85rem",
+          lineHeight: "1.3",
+          height: "2.6em",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          display: "-webkit-box",
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: "vertical",
+          color: T.text,
+        }}
+      >
         {p.name}
       </div>
 
-      {p.rating != null && (
-        <div style={{ fontSize: "0.75rem", color: "#f59e0b", fontWeight: 700 }}>
-          ★ {Number(p.rating).toFixed(1)} <span style={{ color: T.textSoft, fontWeight: 400 }}>({p.reviewCount})</span>
-        </div>
-      )}
+      {/* Rating & Reviews */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.75rem", color: "#f59e0b", fontWeight: 700 }}>
+        <span>★</span>
+        <span>{Number(p.rating || 4.5).toFixed(1)}</span>
+        <span style={{ color: T.textSoft, fontWeight: 400 }}>({p.reviewCount || 10})</span>
+      </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-        <span data-testid="product-price" style={{ fontWeight: 800, fontSize: "0.95rem", color: T.accent }}>
-          {fmtPrice(p.price)}
-        </span>
+      {/* Price & Add to Cart (Pushed consistently to bottom) */}
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginTop: "auto",
+        paddingTop: 8,
+        borderTop: `1px solid ${T.border}`,
+      }}>
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <span data-testid="product-price" style={{ fontWeight: 800, fontSize: "0.95rem", color: T.accent }}>
+            {fmtPrice(p.price)}
+          </span>
+          {p.old_price && p.old_price > p.price && (
+            <span style={{ fontSize: "0.72rem", color: T.textSoft, textDecoration: "line-through" }}>
+              {fmtPrice(p.old_price)}
+            </span>
+          )}
+        </div>
 
         <button
           className="sf-btn"
@@ -1025,9 +1636,13 @@ function ProductCardItem({ p, T, onSelect, onAddToCart }) {
             onAddToCart(p, 1);
           }}
           style={{
-            padding: "6px 14px", borderRadius: 8, border: "none",
+            padding: "6px 12px",
+            borderRadius: 8,
+            border: "none",
             background: isOutOfStock ? T.border : T.accentGrad,
-            color: "#fff", fontSize: "0.78rem", fontWeight: 700,
+            color: "#fff",
+            fontSize: "0.78rem",
+            fontWeight: 700,
             cursor: isOutOfStock ? "not-allowed" : "pointer",
           }}
         >

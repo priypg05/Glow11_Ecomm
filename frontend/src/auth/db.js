@@ -21,14 +21,37 @@ export async function initDB() {
 }
 
 // --------------------------------------------------------------------------
+// Client-side Password Hashing (SHA-256)
+// Prevents plain-text passwords from being exposed in browser Inspect Network tab
+// --------------------------------------------------------------------------
+export async function hashPassword(plainPassword) {
+  if (!plainPassword) return "";
+  const trimmed = typeof plainPassword === "string" ? plainPassword.trim() : plainPassword;
+  // If already 64-char hex SHA-256 string, do not rehash
+  if (/^[a-f0-9]{64}$/i.test(trimmed)) return trimmed;
+  try {
+    const msgUint8 = new TextEncoder().encode(trimmed);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch (e) {
+    console.warn("crypto.subtle not available; transmitting unhashed:", e);
+    return trimmed;
+  }
+}
+
+// --------------------------------------------------------------------------
 // Login
 // --------------------------------------------------------------------------
 export async function dbLogin(email, password) {
   try {
+    const cleanEmail = (email || "").trim().toLowerCase();
+    const cleanPassword = (password || "").trim();
+    const hashedPassword = await hashPassword(cleanPassword);
     const resp = await fetch(`${BACKEND_URL}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: email.trim(), password }),
+      body: JSON.stringify({ email: cleanEmail, password: hashedPassword }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
@@ -48,10 +71,17 @@ export async function dbLogin(email, password) {
 // --------------------------------------------------------------------------
 export async function dbRegister(email, password, name, confirm_password = "") {
   try {
+    const hashedPassword = await hashPassword(password);
+    const hashedConfirm = confirm_password ? await hashPassword(confirm_password) : "";
     const resp = await fetch(`${BACKEND_URL}/api/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: email.trim(), password, confirm_password, name: name.trim() }),
+      body: JSON.stringify({
+        email: email.trim(),
+        password: hashedPassword,
+        confirm_password: hashedConfirm,
+        name: name.trim()
+      }),
     });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
@@ -71,15 +101,17 @@ export async function dbRegister(email, password, name, confirm_password = "") {
 // --------------------------------------------------------------------------
 export async function dbAdminRegister(email, password, name, adminEmail, adminPassword) {
   try {
+    const hashedPassword = await hashPassword(password);
+    const hashedAdminPassword = await hashPassword(adminPassword);
     const resp = await fetch(`${BACKEND_URL}/api/auth/admin-register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         email: email.trim(),
-        password,
+        password: hashedPassword,
         name: name.trim(),
         admin_email: adminEmail.trim(),
-        admin_password: adminPassword,
+        admin_password: hashedAdminPassword,
       }),
     });
     if (!resp.ok) {

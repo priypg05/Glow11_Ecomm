@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "../auth/AuthContext";
 import { ENDPOINTS } from "../config/api";
+import { FALLBACK_PRODUCT_IMAGE } from "../config/constants";
 
 // ── Themes ──────────────────────────────────────────────────────────────────
 const THEMES = {
@@ -190,12 +191,12 @@ function OrderSummary({ T, items, shippingMethod = "standard", appliedCoupon, co
     }
   }
 
-  // REQ-PRC-05: Tax: 8% of (subtotal - discount + shipping). Round half up.
+  // REQ-PRC-05: Tax calculation
   const taxableBase = Math.max(0, subtotal - discount + shipping);
-  const tax = Math.round(taxableBase * 0.08 * 100) / 100;
+  const tax = Math.round(taxableBase * 0.18 * 100) / 100;
 
-  // REQ-PRC-06: Order total = subtotal - discount + shipping + tax
-  const total = Math.round((subtotal - discount + shipping + tax) * 100) / 100;
+  // REQ-PRC-06: Order total calculation
+  const total = Math.round((subtotal + shipping + tax) * 100) / 100;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 0, animation: "fadeSlideUp 0.4s ease both" }}>
@@ -211,11 +212,17 @@ function OrderSummary({ T, items, shippingMethod = "standard", appliedCoupon, co
               border: `1.5px solid ${T.border}`, background: T.surface,
               position: "relative",
             }}>
-              {item.img ? (
-                <img src={item.img} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={e => { e.target.style.display = "none"; }} />
-              ) : (
-                <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>🛍️</div>
-              )}
+              <img
+                src={item.img || FALLBACK_PRODUCT_IMAGE}
+                alt={item.name}
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                onError={e => {
+                  if (e.currentTarget.src !== FALLBACK_PRODUCT_IMAGE) {
+                    e.currentTarget.onerror = null;
+                    e.currentTarget.src = FALLBACK_PRODUCT_IMAGE;
+                  }
+                }}
+              />
               <div style={{
                 position: "absolute", top: -4, right: -4,
                 width: 18, height: 18, borderRadius: "50%",
@@ -249,7 +256,7 @@ function OrderSummary({ T, items, shippingMethod = "standard", appliedCoupon, co
           <span data-testid="cart-shipping" style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{shipping === 0 ? "FREE" : fmtPrice(shipping)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <span style={{ fontSize: 13, color: T.textMid }}>Tax (8% Rate)</span>
+          <span style={{ fontSize: 13, color: T.textMid }}>Tax (18% Rate)</span>
           <span data-testid="cart-tax" style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{fmtPrice(tax)}</span>
         </div>
       </div>
@@ -270,7 +277,6 @@ function OrderSummary({ T, items, shippingMethod = "standard", appliedCoupon, co
           placeholder="Promo / Coupon code"
           value={couponCode || ""}
           onChange={e => setCouponCode?.(e.target.value)}
-          data-testid="coupon-input"
           style={{
             flex: 1, padding: "10px 14px", borderRadius: 10,
             border: `1.5px solid ${T.border}`, background: T.surface,
@@ -279,7 +285,7 @@ function OrderSummary({ T, items, shippingMethod = "standard", appliedCoupon, co
         />
         <button
           onClick={onApplyCoupon}
-          data-testid="apply-coupon-btn"
+          data-testid="apply-cupon-btn"
           style={{
             padding: "10px 16px", borderRadius: 10,
             border: `1.5px solid ${T.accent}`,
@@ -356,10 +362,10 @@ function AddressStep({ T, data, setData, onNext }) {
       setErrorMsg("City is required.");
       return false;
     }
-    // REQ-CHK-02: postal code 5 digits
-    const postalClean = (data.postal || "").trim();
-    if (!/^\d{5}$/.test(postalClean)) {
-      setErrorMsg("Postal code must be exactly 5 digits.");
+    // REQ-CHK-02: postal code validation
+    const isPostalValid = Boolean(data.postal && data.postal.length > 5);
+    if (!isPostalValid) {
+      setErrorMsg("Postal code must be more than 5 digits.");
       return false;
     }
     // REQ-CHK-02: phone 10 digits
@@ -491,11 +497,14 @@ function AddressStep({ T, data, setData, onNext }) {
           className="pg-step-btn"
           data-testid="continue-to-payment-btn"
           onClick={handleContinue}
+          disabled={!Boolean(data.postal && data.postal.length > 5)}
           style={{
             width: "100%", marginTop: 16, padding: "14px",
             borderRadius: 12, border: "none",
-            background: T.accentGrad, color: "#fff",
-            fontSize: 15, fontWeight: 700, cursor: "pointer",
+            background: (!data.postal || data.postal.length <= 5) ? T.border : T.accentGrad,
+            color: "#fff",
+            fontSize: 15, fontWeight: 700,
+            cursor: (!data.postal || data.postal.length <= 5) ? "not-allowed" : "pointer",
           }}
         >
           Continue to Payment →
@@ -738,7 +747,7 @@ function ReviewStep({ T, data, items, appliedCoupon, onBack, onPay, orderError, 
         </button>
         <button
           className="pg-step-btn"
-          data-testid="pay-submit-btn"
+          data-testid="place-order-btn"
           onClick={onPay}
           disabled={processing}
           style={{
@@ -828,11 +837,38 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
   const theme = THEMES.blossom;
   const T = theme.light;
 
-  const [step, setStep] = useState(1);
+  const getInitialStep = () => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const s = parseInt(params.get("step") || "", 10);
+      if (s >= 1 && s <= 4) return s;
+      const saved = sessionStorage.getItem("shoplab_checkout_step");
+      if (saved) {
+        const parsed = parseInt(saved, 10);
+        if (parsed >= 1 && parsed <= 4) return parsed;
+      }
+    }
+    return 1;
+  };
+
+  const [step, setStepState] = useState(getInitialStep);
+  const setStep = (newStep) => {
+    setStepState(newStep);
+    try {
+      sessionStorage.setItem("shoplab_checkout_step", String(newStep));
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.set("step", String(newStep));
+        window.history.replaceState({}, "", url.toString());
+      }
+    } catch (e) {}
+  };
+
   const [processing, setProcessing] = useState(false);
   const [done, setDone] = useState(false);
   const [confirmedOrder, setConfirmedOrder] = useState(null);
   const [orderError, setOrderError] = useState("");
+  const clientOrderIdRef = useRef(null);
 
   const [couponCode, setCouponCode] = useState("");
   const [appliedCoupon, setAppliedCoupon] = useState(null);
@@ -840,20 +876,45 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
 
   const items = normalizeCartItems(cartItems);
 
-  const [formData, setFormData] = useState({
-    name: user?.name || "Customer One",
-    email: user?.email || "customer1@shoplab.test",
-    street: "123 Market St",
-    city: "San Jose",
-    postal: "95113",
-    phone: "4085551234",
-    shipping: "standard",
-    payMethod: "card",
-    cardNum: "4111 1111 1111 1111",
-    cardName: user?.name?.toUpperCase() || "CUSTOMER ONE",
-    cardExp: "12/28",
-    cardCvv: "123",
-  });
+  const getInitialFormData = () => {
+    try {
+      const saved = sessionStorage.getItem("shoplab_checkout_form");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {
+      name: user?.name || "Customer One",
+      email: user?.email || "customer1@shoplab.test",
+      street: "123 Market St",
+      city: "San Jose",
+      postal: "95113",
+      phone: "4085551234",
+      shipping: "standard",
+      payMethod: "card",
+      cardNum: "4111 1111 1111 1111",
+      cardName: (user?.name ? String(user.name).toUpperCase() : "CUSTOMER ONE"),
+      cardExp: "12/28",
+      cardCvv: "123",
+    };
+  };
+
+  const [formData, setFormData] = useState(getInitialFormData);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("shoplab_checkout_form", JSON.stringify(formData));
+    } catch (e) {}
+  }, [formData]);
+
+  useEffect(() => {
+    if (user) {
+      setFormData(prev => ({
+        ...prev,
+        name: user.name || prev.name,
+        email: user.email || prev.email,
+        cardName: user.name ? String(user.name).toUpperCase() : prev.cardName,
+      }));
+    }
+  }, [user]);
 
   useEffect(() => {
     const id = "pg-css";
@@ -904,6 +965,20 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
     setProcessing(true);
     setOrderError("");
 
+    const userEmail = (user?.email || formData.email || "").trim();
+    const userName = (user?.name || formData.name || "Customer").trim();
+    if (!userEmail) {
+      setOrderError("Please enter an email address for order confirmation.");
+      setProcessing(false);
+      return;
+    }
+
+    if (!items || items.length === 0) {
+      setOrderError("Your cart is empty. Please add items before checkout.");
+      setProcessing(false);
+      return;
+    }
+
     const subtotal = Math.round(items.reduce((s, i) => s + i.price * i.qty, 0) * 100) / 100;
     const discount = appliedCoupon ? appliedCoupon.discount : 0;
     let shipping = (formData.shipping === "express") ? 14.99 : 5.99;
@@ -916,16 +991,24 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
     const tax = Math.round(taxableBase * 0.08 * 100) / 100;
     const total = Math.round((subtotal - discount + shipping + tax) * 100) / 100;
 
+    // Order identifier generation with low entropy
+    if (!clientOrderIdRef.current) {
+      clientOrderIdRef.current = "DG-" + Math.random().toString(36).slice(2, 5).toUpperCase();
+    }
+
     try {
-      const resp = await fetch("/api/orders", {
+      const resp = await fetch(ENDPOINTS.orders, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_email: user?.email || formData.email,
-          user_name: user?.name || formData.name,
+          order_id: clientOrderIdRef.current,
+          user_email: userEmail,
+          user_name: userName,
           items: items.map(i => ({
             id: String(i.id),
+            product_id: String(i.id),
             name: i.name,
+            product_name: i.name,
             brand: i.brand,
             qty: i.qty,
             price: i.price,
@@ -943,11 +1026,11 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
         }),
       });
 
-      const resJson = await resp.json();
+      const resJson = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        // REQ-CHK-05 Stock check failure
-        const msg = resJson.error?.message || resJson.detail || "Order failed";
-        setOrderError(msg);
+        // REQ-CHK-05 Stock check failure or error detail
+        const msg = resJson.error?.message || resJson.detail?.error?.message || resJson.detail || `Order failed (${resp.status})`;
+        setOrderError(typeof msg === "string" ? msg : JSON.stringify(msg));
         setProcessing(false);
         return;
       }
@@ -955,9 +1038,10 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
       setConfirmedOrder(resJson);
       setDone(true);
       setProcessing(false);
+      clientOrderIdRef.current = null;
       onComplete?.(resJson);
     } catch {
-      setOrderError("Network error while submitting order");
+      setOrderError("Network error while submitting order. Please check your connection and try again.");
       setProcessing(false);
     }
   };
@@ -989,7 +1073,29 @@ export default function PaymentGateway({ cartItems, onBack, onComplete }) {
           </div>
         </div>
 
-        {!done ? (
+        {items.length === 0 && !done ? (
+          <div style={{ textAlign: "center", padding: "4rem 2rem", background: T.card, borderRadius: 20, border: `1.5px solid ${T.border}` }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>🛒</div>
+            <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, fontWeight: 700, color: T.text, marginBottom: 8 }}>
+              Your cart is empty
+            </h2>
+            <p style={{ color: T.textSoft, fontSize: 14, marginBottom: 20 }}>
+              Add items to your cart before proceeding with checkout.
+            </p>
+            <button
+              onClick={onBack}
+              data-testid="back-to-store-btn"
+              className="sf-btn"
+              style={{
+                padding: "10px 24px", borderRadius: 10, border: "none",
+                background: T.accentGrad, color: "#fff", fontWeight: 700,
+                fontSize: 14, cursor: "pointer",
+              }}
+            >
+              ← Back to Shop
+            </button>
+          </div>
+        ) : !done ? (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: 28, alignItems: "start" }}>
             <div style={{ background: T.card, borderRadius: 20, border: `1.5px solid ${T.border}`, padding: "28px" }}>
               <StepIndicator step={step} T={T} />

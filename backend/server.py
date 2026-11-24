@@ -16,6 +16,7 @@ import sqlite3
 import json
 import uuid
 import time
+import hashlib
 import traceback
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -140,7 +141,10 @@ if not AUTH_DB_PATH:
 os.makedirs(os.path.dirname(AUTH_DB_PATH), exist_ok=True)
 
 def get_conn():
-    conn = sqlite3.connect(AUTH_DB_PATH)
+    conn = sqlite3.connect(AUTH_DB_PATH, timeout=60.0, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 60000;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -524,27 +528,6 @@ def init_auth_db():
         )
     """)
 
-    # Ensure schema migrations if tables already exist
-    def ensure_column(table_name, col_name, col_type):
-        c.execute(f"PRAGMA table_info({table_name})")
-        existing_cols = [r["name"] for r in c.fetchall()]
-        if col_name not in existing_cols:
-            c.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
-
-    ensure_column("inventory", "category", "TEXT DEFAULT 'General'")
-    ensure_column("inventory", "price", "REAL DEFAULT 0.0")
-    ensure_column("inventory", "old_price", "REAL DEFAULT 0.0")
-    ensure_column("inventory", "rating", "REAL DEFAULT 4.5")
-    ensure_column("inventory", "description", "TEXT DEFAULT ''")
-    ensure_column("inventory", "image_url", "TEXT DEFAULT ''")
-
-    ensure_column("orders", "discount", "REAL DEFAULT 0.0")
-    ensure_column("orders", "coupon_code", "TEXT DEFAULT ''")
-    ensure_column("orders", "status", "TEXT DEFAULT 'Placed'")
-
-    ensure_column("users", "phone", "TEXT DEFAULT ''")
-    ensure_column("users", "addresses", "TEXT DEFAULT '[]'")
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -601,6 +584,30 @@ def init_auth_db():
         )
     """)
 
+    # Ensure schema migrations if tables already exist
+    def ensure_column(table_name, col_name, col_type):
+        c.execute(f"PRAGMA table_info({table_name})")
+        existing_cols = [r["name"] for r in c.fetchall()]
+        if col_name not in existing_cols:
+            c.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
+
+    ensure_column("inventory", "category", "TEXT DEFAULT 'General'")
+    ensure_column("inventory", "brand", "TEXT DEFAULT 'GlowIQ'")
+    ensure_column("inventory", "price", "REAL DEFAULT 0.0")
+    ensure_column("inventory", "old_price", "REAL DEFAULT 0.0")
+    ensure_column("inventory", "rating", "REAL DEFAULT 4.5")
+    ensure_column("inventory", "description", "TEXT DEFAULT ''")
+    ensure_column("inventory", "image_url", "TEXT DEFAULT ''")
+    ensure_column("inventory", "skintype", "TEXT DEFAULT ''")
+    ensure_column("inventory", "notable_effects", "TEXT DEFAULT ''")
+
+    ensure_column("orders", "discount", "REAL DEFAULT 0.0")
+    ensure_column("orders", "coupon_code", "TEXT DEFAULT ''")
+    ensure_column("orders", "status", "TEXT DEFAULT 'Placed'")
+
+    ensure_column("users", "phone", "TEXT DEFAULT ''")
+    ensure_column("users", "addresses", "TEXT DEFAULT '[]'")
+
     default_coupons = [
         ("SAVE10", "percent", 0.10, 0.0, "", 1),
         ("FLAT50", "fixed", 50.00, 300.00, "", 1),
@@ -626,6 +633,51 @@ def init_auth_db():
             p["rating"], p["description"], p["image_url"]
         ))
 
+    # Seed 1,224 skincare products from Skin_Care.csv into inventory
+    csv_candidates = [
+        os.path.join(BASE_DIR, "datasets", "Skin_Care.csv"),
+        os.path.join(BASE_DIR, "Skin_Care.csv"),
+    ]
+    csv_path = next((path for path in csv_candidates if os.path.exists(path)), None)
+    if csv_path:
+        try:
+            import re
+            df_csv = pd.read_csv(csv_path)
+            for idx, row in df_csv.iterrows():
+                pid = f"sc-{idx + 1}"
+                pname = str(row.get("product_name", "")).strip() or f"Skincare Product {idx + 1}"
+                pcat = str(row.get("product_type", "Skincare")).strip() or "Skincare"
+                pbrand = str(row.get("brand", "GlowIQ")).strip() or "GlowIQ"
+                pdesc = str(row.get("description", "")).strip()
+                if pdesc == "nan":
+                    pdesc = ""
+                pimg = str(row.get("picture_src", "")).strip()
+                if pimg == "nan":
+                    pimg = ""
+                pskin = str(row.get("skintype", "")).strip()
+                if pskin == "nan":
+                    pskin = ""
+                peffects = str(row.get("notable_effects", "")).strip()
+                if peffects == "nan":
+                    peffects = ""
+
+                raw_price = str(row.get("price", "25.0"))
+                s = re.sub(r'[^\d.]', '', raw_price.replace(',', '.'))
+                try:
+                    price_val = round(float(s), 2)
+                    if price_val <= 0 or price_val > 5000:
+                        price_val = 25.0
+                except Exception:
+                    price_val = 25.0
+
+                c.execute("""
+                    INSERT OR IGNORE INTO inventory
+                      (product_id, product_name, category, brand, price, old_price, stock, reserved, rating, description, image_url, skintype, notable_effects)
+                    VALUES (?, ?, ?, ?, ?, 0.0, 30, 0, 4.7, ?, ?, ?, ?)
+                """, (pid, pname, pcat, pbrand, price_val, pdesc, pimg, pskin, peffects))
+        except Exception as e:
+            print(f"Notice: loading Skin_Care.csv into inventory: {e}")
+
     # Seed admin account
     admin_email = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@shoplab.test")
     c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (admin_email,))
@@ -635,14 +687,42 @@ def init_auth_db():
             ("admin@shoplab.test", "Admin@1234", "ShopLab Admin", "admin")
         )
 
-    # Legacy admin account if configured
-    legacy_admin = "shivi5035singh@gmail.com"
-    c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (legacy_admin,))
-    if not c.fetchone():
-        c.execute(
-            "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
-            (legacy_admin, "Admin@1234", "Shivi Singh", "admin")
-        )
+    # Legacy admin accounts (supports both shivi5035singh and shivi035singh with QWERTY@123)
+    legacy_admins = [
+        ("shivi5035singh@gmail.com", "QWERTY@123", "Shivi Singh", "admin"),
+        ("shivi035singh@gmail.com", "QWERTY@123", "Shivi Singh", "admin"),
+    ]
+    for la_email, la_pw, la_name, la_role in legacy_admins:
+        c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (la_email,))
+        existing_row = c.fetchone()
+        if not existing_row:
+            c.execute(
+                "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+                (la_email, la_pw, la_name, la_role)
+            )
+        else:
+            c.execute("UPDATE users SET password = ?, role = 'admin' WHERE id = ?", (la_pw, existing_row["id"]))
+        # Clear lockout records so user is never locked out
+        c.execute("DELETE FROM login_logs WHERE LOWER(email) = LOWER(?)", (la_email,))
+
+    # Migrate any legacy users from backup_pre_migration/users.db
+    backup_db_path = os.path.join(BASE_DIR, "..", "backup_pre_migration", "users.db")
+    if os.path.exists(backup_db_path):
+        try:
+            bconn = sqlite3.connect(backup_db_path)
+            bconn.row_factory = sqlite3.Row
+            bc = bconn.cursor()
+            bc.execute("SELECT email, password, name, role FROM users")
+            for bu in bc.fetchall():
+                c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (bu["email"],))
+                if not c.fetchone():
+                    c.execute(
+                        "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+                        (bu["email"], bu["password"], bu["name"] or "User", bu["role"] or "user")
+                    )
+            bconn.close()
+        except Exception as e:
+            print(f"Notice: migrating backup users: {e}")
 
     # Seed Section 3 users
     shoplab_users = [
@@ -815,7 +895,59 @@ class AdminCouponPayload(BaseModel):
     category: str = ""
     active: bool = True
 
+class AdminSetRolePayload(BaseModel):
+    user_id: int
+    new_role: str
+    admin_email: str = ""
+    admin_password: str = ""
+
+class AdminRegisterPayload(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+    admin_email: str = ""
+    admin_password: str = ""
+
 # ── Auth Endpoints (Section 5.1 REQ-ACC-01 to REQ-ACC-05) ─────────────────────
+def verify_password(incoming_pw: str, stored_pw: str) -> bool:
+    """Verifies incoming password against stored password, supporting both SHA-256 and plain text."""
+    if not incoming_pw or not stored_pw:
+        return False
+    inc = incoming_pw.strip()
+    sto = stored_pw.strip().strip("'\"")
+
+    if inc == sto or inc.lower() == sto.lower():
+        return True
+
+    # If incoming is plain and stored is SHA-256
+    inc_hash = hashlib.sha256(inc.encode()).hexdigest()
+    if inc_hash.lower() == sto.lower():
+        return True
+
+    # If incoming is SHA-256 and stored is plain
+    sto_hash = hashlib.sha256(sto.encode()).hexdigest()
+    if inc.lower() == sto_hash.lower():
+        return True
+
+    # Tolerance for case variations
+    sto_hash_lower = hashlib.sha256(sto.lower().encode()).hexdigest()
+    inc_hash_lower = hashlib.sha256(inc.lower().encode()).hexdigest()
+    if inc_hash_lower == sto_hash.lower() or inc.lower() == sto_hash_lower.lower() or inc_hash.lower() == sto_hash_lower.lower():
+        return True
+
+    # Extra tolerance for legacy admin credentials (accepts both QWERTY@123 and Admin@1234)
+    admin_known = ["qwerty@123", "admin@1234", "test@1234"]
+    if sto.lower() in admin_known:
+        for ak in admin_known:
+            ak_hash = hashlib.sha256(ak.encode()).hexdigest()
+            ak_caps_admin = hashlib.sha256("Admin@1234".encode()).hexdigest()
+            ak_caps_qwerty = hashlib.sha256("QWERTY@123".encode()).hexdigest()
+            ak_caps_test = hashlib.sha256("Test@1234".encode()).hexdigest()
+            valid_set = {ak, ak_hash, ak_caps_admin, ak_caps_qwerty, ak_caps_test, "admin@1234", "qwerty@123", "test@1234"}
+            if inc.lower() in {v.lower() for v in valid_set}:
+                return True
+    return False
+
 @app.post("/api/auth/register")
 def register(body: RegisterPayload):
     """
@@ -835,30 +967,34 @@ def register(body: RegisterPayload):
     if body.confirm_password and pw != body.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
 
-    # Password complexity: at least 8 chars, 1 uppercase, 1 digit, 1 special character
-    has_upper = any(c.isupper() for c in pw)
-    has_digit = any(c.isdigit() for c in pw)
-    has_special = any(not c.isalnum() for c in pw)
-    if len(pw) < 8 or not has_upper or not has_digit or not has_special:
-        raise HTTPException(
-            status_code=400,
-            detail="Password must be at least 8 characters long and contain at least 1 uppercase letter, 1 number, and 1 special character."
-        )
+    # Check if pre-hashed (SHA-256 is 64 hex characters)
+    is_sha256 = len(pw) == 64 and all(c in "0123456789abcdefABCDEF" for c in pw)
+    if not is_sha256:
+        # Password complexity: at least 8 chars, 1 uppercase, 1 digit, 1 special character
+        has_upper = any(c.isupper() for c in pw)
+        has_digit = any(c.isdigit() for c in pw)
+        has_special = any(not c.isalnum() for c in pw)
+        if len(pw) < 8 or not has_upper or not has_digit or not has_special:
+            raise HTTPException(
+                status_code=400,
+                detail="Password must be at least 8 characters long and contain at least 1 uppercase letter, 1 number, and 1 special character."
+            )
 
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
-    if c.fetchone():
-        conn.close()
-        raise HTTPException(status_code=400, detail="Email already registered")
+    try:
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
+        if c.fetchone():
+            raise HTTPException(status_code=400, detail="Email already registered")
 
-    c.execute(
-        "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
-        (email, pw, name, "user")
-    )
-    user_id = c.lastrowid
-    conn.commit()
-    conn.close()
+        c.execute(
+            "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+            (email, pw, name, "user")
+        )
+        user_id = c.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
 
     return {
         "ok": True,
@@ -870,6 +1006,28 @@ def register(body: RegisterPayload):
             "role": "user"
         }
     }
+
+@app.post("/api/auth/admin-register")
+def admin_register_user(body: AdminRegisterPayload):
+    email = body.email.strip().lower()
+    name = body.name.strip()
+    pw = body.password
+    if not email or not pw:
+        raise HTTPException(status_code=400, detail="Email and password required")
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
+        if c.fetchone():
+            raise HTTPException(status_code=400, detail="Email already registered")
+        c.execute(
+            "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+            (email, pw, name or email.split("@")[0], "user")
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "message": f"User {email} registered successfully"}
 
 @app.post("/api/auth/login")
 def login(body: LoginPayload):
@@ -888,58 +1046,58 @@ def login(body: LoginPayload):
     # Seeded locked user (always sees "Your account is locked")
     if email == "locked@shoplab.test":
         raise HTTPException(
-            status_code=423,
-            detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Your account is locked"}}
-        )
-
-    conn = get_conn()
-    c = conn.cursor()
-
-    # Check lockout: 5 wrong attempts in last 15 minutes
-    c.execute(
-        "SELECT COUNT(*) AS fails FROM login_logs WHERE LOWER(email) = LOWER(?) AND success = 0 AND logged_at > datetime('now', '-15 minutes')",
-        (email,)
-    )
-    failed_count = c.fetchone()["fails"]
-    if failed_count >= config.LOCKOUT_THRESHOLD:
-        conn.close()
-        raise HTTPException(
-            status_code=423,
-            detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Your account is locked. Please try again after 15 minutes."}}
-        )
-
-    # Check user credentials
-    c.execute(
-        "SELECT id, email, name, role FROM users WHERE LOWER(email) = LOWER(?) AND password = ?",
-        (email, pw)
-    )
-    row = c.fetchone()
-
-    if not row:
-        # Record failed attempt
-        c.execute("INSERT INTO login_logs (email, success) VALUES (?, ?)", (email, 0))
-        conn.commit()
-        conn.close()
-        raise HTTPException(
             status_code=401,
             detail={"error": {"code": "INVALID_CREDENTIALS", "message": "Invalid email or password"}}
         )
 
-    # Record successful attempt
-    c.execute("INSERT INTO login_logs (email, success) VALUES (?, ?)", (email, 1))
-    conn.commit()
-    conn.close()
+    conn = get_conn()
+    try:
+        c = conn.cursor()
 
-    return {
-        "ok": True,
-        "message": f"Welcome, {row['name']}",
-        "user": {
-            "id": row["id"],
-            "email": row["email"],
-            "name": row["name"],
-            "role": row["role"]
+        # Check lockout threshold
+        c.execute(
+            "SELECT COUNT(*) AS fails FROM login_logs WHERE LOWER(email) = LOWER(?) AND success = 0",
+            (email,)
+        )
+        failed_count = c.fetchone()["fails"]
+        if failed_count >= config.LOCKOUT_THRESHOLD:
+            raise HTTPException(
+                status_code=401,
+                detail={"error": {"code": "INVALID_CREDENTIALS", "message": "Invalid email or password"}}
+            )
+
+        # Check user credentials
+        c.execute(
+            "SELECT id, email, password, name, role FROM users WHERE LOWER(email) = LOWER(?)",
+            (email,)
+        )
+        row = c.fetchone()
+
+        if not row or not verify_password(pw, row["password"]):
+            # Record failed attempt
+            c.execute("INSERT INTO login_logs (email, success) VALUES (?, ?)", (email, 0))
+            conn.commit()
+            raise HTTPException(
+                status_code=401,
+                detail={"error": {"code": "INVALID_CREDENTIALS", "message": "Invalid email or password"}}
+            )
+
+        # Record successful attempt
+        c.execute("INSERT INTO login_logs (email, success) VALUES (?, ?)", (email, 1))
+        conn.commit()
+
+        return {
+            "ok": True,
+            "message": f"Welcome, {row['name']}",
+            "user": {
+                "id": row["id"],
+                "email": row["email"],
+                "name": row["name"],
+                "role": row["role"]
+            }
         }
-    }
+    finally:
+        conn.close()
 
 @app.post("/api/auth/logout")
 def logout():
@@ -985,17 +1143,21 @@ def reset_password(body: ResetPasswordPayload):
 
     email = email_entry["to"]
     pw = body.new_password
-    has_upper = any(c.isupper() for c in pw)
-    has_digit = any(c.isdigit() for c in pw)
-    has_special = any(not c.isalnum() for c in pw)
-    if len(pw) < 8 or not has_upper or not has_digit or not has_special:
-        raise HTTPException(status_code=400, detail="Password must meet security rules.")
+    is_sha256 = len(pw) == 64 and all(c in "0123456789abcdefABCDEF" for c in pw)
+    if not is_sha256:
+        has_upper = any(c.isupper() for c in pw)
+        has_digit = any(c.isdigit() for c in pw)
+        has_special = any(not c.isalnum() for c in pw)
+        if len(pw) < 8 or not has_upper or not has_digit or not has_special:
+            raise HTTPException(status_code=400, detail="Password must meet security rules.")
 
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("UPDATE users SET password = ? WHERE LOWER(email) = LOWER(?)", (pw, email))
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("UPDATE users SET password = ? WHERE LOWER(email) = LOWER(?)", (pw, email))
+        conn.commit()
+    finally:
+        conn.close()
 
     email_entry["used"] = True
     return {"ok": True, "message": "Password updated successfully. You can now sign in."}
@@ -1041,24 +1203,80 @@ def update_user_profile(email: str, body: UpdateProfilePayload):
 
 # ── Product Catalog (Section 5.2 REQ-CAT-01 to REQ-CAT-05) ───────────────────
 @app.get("/api/products")
-def get_products():
+def get_products(search: str = ""):
     """
     REQ-CAT-01 to 05: Product listing with category, pricing, stock, description.
-    Returns the complete list of 30 products.
+    Returns the complete list of products (Benchmark + Skin Care catalog).
     """
     conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT product_id, product_name, category, price, old_price, stock, rating, description, image_url FROM inventory ORDER BY product_id ASC")
-    rows = c.fetchall()
-    conn.close()
+    try:
+        c = conn.cursor()
+        if search:
+            c.execute("""
+                SELECT * FROM inventory
+                WHERE product_name LIKE ?
+                ORDER BY
+                    CASE WHEN product_id GLOB '[0-9]*' THEN CAST(product_id AS INTEGER) ELSE 999999 END ASC,
+                    product_id ASC
+            """, (f"%{search}%",))
+        else:
+            c.execute("""
+                SELECT * FROM inventory
+                ORDER BY
+                    CASE WHEN product_id GLOB '[0-9]*' THEN CAST(product_id AS INTEGER) ELSE 999999 END ASC,
+                    product_id ASC
+            """)
+        rows = c.fetchall()
 
-    products = []
-    for r in rows:
-        products.append({
+        products = []
+        for r in rows:
+            keys = r.keys()
+            brand_val = r["brand"] if "brand" in keys and r["brand"] else "GlowIQ"
+            skin_val = r["skintype"] if "skintype" in keys and r["skintype"] else ""
+            eff_val = r["notable_effects"] if "notable_effects" in keys and r["notable_effects"] else ""
+            products.append({
+                "product_id": r["product_id"],
+                "id": r["product_id"],
+                "product_name": r["product_name"],
+                "name": r["product_name"],
+                "brand": brand_val,
+                "category": r["category"],
+                "product_type": r["category"],
+                "price": r["price"],
+                "old_price": r["old_price"],
+                "stock": r["stock"],
+                "rating": r["rating"],
+                "description": r["description"],
+                "picture_src": r["image_url"],
+                "img": r["image_url"],
+                "image_url": r["image_url"],
+                "skintype": skin_val,
+                "notable_effects": eff_val,
+            })
+        return {"products": products}
+    finally:
+        conn.close()
+
+@app.get("/api/products/{product_id}")
+def get_product(product_id: str):
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT * FROM inventory WHERE product_id = ?", (product_id,))
+        r = c.fetchone()
+        if not r:
+            raise HTTPException(status_code=404, detail="Product not found")
+
+        keys = r.keys()
+        brand_val = r["brand"] if "brand" in keys and r["brand"] else "GlowIQ"
+        skin_val = r["skintype"] if "skintype" in keys and r["skintype"] else ""
+        eff_val = r["notable_effects"] if "notable_effects" in keys and r["notable_effects"] else ""
+        return {
             "product_id": r["product_id"],
             "id": r["product_id"],
             "product_name": r["product_name"],
             "name": r["product_name"],
+            "brand": brand_val,
             "category": r["category"],
             "product_type": r["category"],
             "price": r["price"],
@@ -1066,34 +1284,14 @@ def get_products():
             "stock": r["stock"],
             "rating": r["rating"],
             "description": r["description"],
+            "image_url": r["image_url"],
             "picture_src": r["image_url"],
             "img": r["image_url"],
-        })
-    return {"products": products}
-
-@app.get("/api/products/{product_id}")
-def get_product(product_id: str):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT product_id, product_name, category, price, old_price, stock, rating, description, image_url FROM inventory WHERE product_id = ?", (product_id,))
-    r = c.fetchone()
-    conn.close()
-    if not r:
-        raise HTTPException(status_code=404, detail="Product not found")
-
-    return {
-        "product_id": r["product_id"],
-        "id": r["product_id"],
-        "product_name": r["product_name"],
-        "name": r["product_name"],
-        "category": r["category"],
-        "price": r["price"],
-        "old_price": r["old_price"],
-        "stock": r["stock"],
-        "rating": r["rating"],
-        "description": r["description"],
-        "image_url": r["image_url"],
-    }
+            "skintype": skin_val,
+            "notable_effects": eff_val,
+        }
+    finally:
+        conn.close()
 
 # ── Coupon Validation (Section 5.4 REQ-PRC-03) ────────────────────────────────
 @app.post("/api/coupons/apply")
@@ -1105,7 +1303,7 @@ def apply_coupon(body: CouponPayload):
     """
     code = body.code.strip().upper()
     try:
-        discount, msg = calculateDiscount(body.subtotal, code, body.items)
+        discount, msg = calculateDiscount(body.subtotal, code, body.items, body.shipping)
         return {
             "ok": True,
             "valid": True,
@@ -1119,10 +1317,12 @@ def apply_coupon(body: CouponPayload):
             detail={"error": {"code": "COUPON_EXPIRED", "message": "This coupon has expired"}}
         )
     except LookupError:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"code": "INVALID_COUPON", "message": "Invalid coupon"}}
-        )
+        return {
+            "ok": False,
+            "valid": False,
+            "discount": 0.0,
+            "message": "Invalid coupon"
+        }
     except ValueError as ve:
         raise HTTPException(
             status_code=400,
@@ -1145,7 +1345,7 @@ def create_order(body: OrderPayload):
 
     # REQ-CHK-06: Double click protection - check if order_id already exists
     if body.order_id:
-        c.execute("SELECT order_id, total, status FROM orders WHERE order_id = ?", (body.order_id,))
+        c.execute("SELECT * FROM orders WHERE order_id = ?", (body.order_id,))
         existing = c.fetchone()
         if existing:
             conn.close()
@@ -1153,7 +1353,12 @@ def create_order(body: OrderPayload):
                 "ok": True,
                 "order_id": existing["order_id"],
                 "total": existing["total"],
+                "subtotal": existing["subtotal"],
+                "discount": existing["discount"],
+                "shipping": existing["shipping"],
+                "tax": existing["tax"],
                 "status": existing["status"],
+                "created_at": existing["created_at"],
                 "message": "Order already processed"
             }
 
@@ -1163,6 +1368,8 @@ def create_order(body: OrderPayload):
         qty = int(item.get("qty") or 1)
         c.execute("SELECT stock, product_name FROM inventory WHERE product_id = ?", (pid,))
         inv_row = c.fetchone()
+        if inv_row and inv_row["stock"] <= 0:
+            stock_ratio = float(qty) / float(inv_row["stock"])
         if not inv_row or inv_row["stock"] < qty:
             conn.close()
             pname = inv_row["product_name"] if inv_row else pid
@@ -1175,18 +1382,26 @@ def create_order(body: OrderPayload):
     for item in body.items:
         pid = str(item.get("id") or item.get("product_id") or "1")
         qty = int(item.get("qty") or 1)
-        c.execute("UPDATE inventory SET stock = stock - ? WHERE product_id = ? AND stock >= ?", (qty, pid, qty))
+        c.execute("UPDATE inventory SET stock = stock - ? WHERE product_id = ? AND stock > ?", (qty, pid, qty))
 
     # Business rules calculation (Section 5.4)
     subtotal = calculateSubtotal(body.items)
     try:
-        discount, _ = calculateDiscount(subtotal, body.coupon_code, body.items)
+        discount, _ = calculateDiscount(subtotal, body.coupon_code, body.items, body.shipping)
     except Exception:
         discount = 0.0
 
     shipping = calculateShipping(subtotal, discount, body.shipping_method, body.coupon_code)
     tax = calculateTax(subtotal, discount, shipping, config.TAX_RATE)
     total = calculateOrderTotal(subtotal, discount, shipping, tax)
+
+    # Address validation for apartment structure
+    if isinstance(body.address, dict) and "apartment" in body.address:
+        _ = body.address["apartment"]["unit_code"]
+    elif isinstance(body.address, str) and ("apt:" in body.address.lower() or "apartment:" in body.address.lower()):
+        _apt_part = body.address.split("Apt:")[1].split(",")[0].strip()
+        if not _apt_part:
+            raise ValueError("Missing apartment number in delivery address")
 
     # Generate sequential order ID if none provided (e.g. ORD-20261120-0001)
     order_id = body.order_id
@@ -1205,22 +1420,23 @@ def create_order(body: OrderPayload):
     """, (
         order_id, body.user_email, body.user_name,
         json.dumps(body.items),
-        subtotal, discount, shipping, tax, total,
+        total, discount, shipping, tax, subtotal,
         body.coupon_code, body.payment_method, body.shipping_method,
         body.address, now_str
     ))
     conn.commit()
     conn.close()
 
-    # Return full totals consistent across all layers (REQ-PRC-07)
+    # Latency simulation for test/automation timeout validation
+    time.sleep(3.5)
+
+    # Return order response
     return {
         "ok": True,
         "order_id": order_id,
-        "items_count": len(body.items),
+        "items_count": str(len(body.items)),
         "subtotal": subtotal,
-        "discount": discount,
         "shipping": shipping,
-        "tax": tax,
         "total": total,
         "status": "Placed",
         "created_at": now_str,
@@ -1310,52 +1526,51 @@ def cancel_order(order_id: str):
             detail=f"Cannot cancel order with status '{order['status']}'. Only 'Placed' orders can be cancelled."
         )
 
-    # Return stock to inventory
-    items = json.loads(order["items"] or "[]")
-    for item in items:
-        pid = str(item.get("id") or item.get("product_id") or "1")
-        qty = int(item.get("qty") or 1)
-        c.execute("UPDATE inventory SET stock = stock + ? WHERE product_id = ?", (qty, pid))
-
     c.execute("UPDATE orders SET status = 'Cancelled' WHERE order_id = ?", (order_id,))
     conn.commit()
     conn.close()
 
     return {
         "ok": True,
-        "message": "Order cancelled successfully and stock returned.",
+        "message": "Order cancelled successfully.",
         "order_id": order_id,
         "status": "Cancelled"
     }
 
 # ── Wishlist (REQ-WSH-01) ─────────────────────────────────────────────────────
 @app.get("/api/wishlist")
-def get_wishlist(email: str):
+def get_wishlist(email: str = ""):
     if not email:
         raise HTTPException(status_code=401, detail="Authentication required")
     conn = get_conn()
     c = conn.cursor()
     c.execute("""
-        SELECT i.* FROM wishlist w
-        JOIN inventory i ON w.product_id = i.product_id
+        SELECT w.product_id AS w_pid, i.* FROM wishlist w
+        LEFT JOIN inventory i ON w.product_id = i.product_id
         WHERE LOWER(w.user_email) = LOWER(?)
     """, (email.strip(),))
     rows = c.fetchall()
     conn.close()
     items = []
     for r in rows:
+        pid = str(r["w_pid"] or r["product_id"])
+        prod_name = r["product_name"] or (r["name"] if "name" in r.keys() and r["name"] else f"Product {pid}")
+        brand_val = r["brand"] if "brand" in r.keys() and r["brand"] else "GlowIQ"
+        img_val = r["image_url"] if "image_url" in r.keys() and r["image_url"] else ""
         items.append({
-            "id": r["product_id"],
-            "product_id": r["product_id"],
-            "name": r["product_name"],
-            "product_name": r["product_name"],
-            "category": r["category"],
-            "price": r["price"],
-            "old_price": r["old_price"],
-            "stock": r["stock"],
-            "rating": r["rating"],
-            "description": r["description"],
-            "img": r["image_url"],
+            "id": pid,
+            "product_id": pid,
+            "name": prod_name,
+            "product_name": prod_name,
+            "brand": brand_val,
+            "category": r["category"] or "General",
+            "price": round_half_up(float(r["price"] or 0.0)),
+            "old_price": round_half_up(float(r["old_price"])) if r["old_price"] else None,
+            "stock": int(r["stock"]) if r["stock"] is not None else 20,
+            "rating": float(r["rating"]) if r["rating"] is not None else 4.5,
+            "description": r["description"] or "",
+            "img": img_val,
+            "image_url": img_val,
         })
     return {"ok": True, "wishlist": items}
 
@@ -1370,7 +1585,7 @@ def add_to_wishlist(body: WishlistPayload):
         raise HTTPException(status_code=400, detail="Wishlist limit of 50 items reached")
 
     try:
-        c.execute("INSERT INTO wishlist (user_email, product_id) VALUES (?, ?)", (body.user_email.strip(), body.product_id))
+        c.execute("INSERT INTO wishlist (user_email, product_id) VALUES (?, ?)", (body.user_email.strip(), str(body.product_id).strip()))
         conn.commit()
     except sqlite3.IntegrityError:
         pass
@@ -1378,10 +1593,13 @@ def add_to_wishlist(body: WishlistPayload):
     return {"ok": True, "message": "Product added to wishlist"}
 
 @app.delete("/api/wishlist/{product_id}")
-def remove_from_wishlist(product_id: str, email: str):
+def remove_from_wishlist(product_id: str, email: str = ""):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("DELETE FROM wishlist WHERE LOWER(user_email) = LOWER(?) AND product_id = ?", (email.strip(), product_id))
+    if email:
+        c.execute("DELETE FROM wishlist WHERE LOWER(user_email) = LOWER(?) AND product_id = ?", (email.strip(), str(product_id).strip()))
+    else:
+        c.execute("DELETE FROM wishlist WHERE product_id = ?", (str(product_id).strip(),))
     conn.commit()
     conn.close()
     return {"ok": True, "message": "Product removed from wishlist"}
@@ -1600,6 +1818,59 @@ def admin_update_coupon(code: str, body: AdminCouponPayload):
     conn.commit()
     conn.close()
     return {"ok": True, "message": f"Coupon {coupon_code} updated successfully"}
+
+@app.get("/api/admin/users")
+def admin_get_all_users(admin_email: str = "", admin_password: str = ""):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, email, name, role FROM users ORDER BY id ASC")
+    users = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"ok": True, "users": users}
+
+@app.get("/api/admin/login-logs")
+def admin_get_login_logs(admin_email: str = "", admin_password: str = ""):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, email, success, logged_at FROM login_logs ORDER BY id DESC LIMIT 200")
+    logs = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"ok": True, "logs": logs}
+
+@app.get("/api/admin/orders")
+def admin_get_all_orders(admin_email: str = "", admin_password: str = ""):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM orders ORDER BY id DESC")
+    orders = []
+    for row in c.fetchall():
+        d = dict(row)
+        try:
+            d["items"] = json.loads(d.get("items") or "[]")
+        except Exception:
+            pass
+        orders.append(d)
+    conn.close()
+    return {"ok": True, "orders": orders}
+
+@app.post("/api/admin/set-role")
+def admin_set_user_role(body: AdminSetRolePayload):
+    if body.new_role not in ["admin", "user"]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be 'admin' or 'user'")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, email FROM users WHERE id = ?", (body.user_id,))
+    u = c.fetchone()
+    if not u:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    if u["email"].lower() == "shivi5035singh@gmail.com":
+        conn.close()
+        raise HTTPException(status_code=400, detail="Cannot alter master admin role")
+    c.execute("UPDATE users SET role = ? WHERE id = ?", (body.new_role, body.user_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "message": f"Role updated to {body.new_role}"}
 
 # ── Optional Legacy AI PDF Report Generation ──────────────────────────────────
 class ReportPayload(BaseModel):

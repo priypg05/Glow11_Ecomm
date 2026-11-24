@@ -36,8 +36,35 @@ const PAGES = {
 };
 
 export default function AdminApp() {
-  const [page, setPage] = useState("overview");
+  const getInitialAdminTab = () => {
+    if (typeof window !== "undefined") {
+      const urlParams = new URLSearchParams(window.location.search);
+      const tabParam = urlParams.get("tab");
+      if (tabParam && PAGES[tabParam]) return tabParam;
+      const hashParam = window.location.hash.replace("#", "");
+      if (hashParam && PAGES[hashParam]) return hashParam;
+      const saved = localStorage.getItem("admin_active_tab");
+      if (saved && PAGES[saved]) return saved;
+    }
+    return "overview";
+  };
+
+  const [page, setPageState] = useState(getInitialAdminTab);
   const { user, logout } = useAuth();
+
+  const setPage = (newPage) => {
+    setPageState(newPage);
+    try {
+      localStorage.setItem("admin_active_tab", newPage);
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.set("tab", newPage);
+        window.history.replaceState({}, "", url.toString());
+      }
+    } catch (e) {
+      console.error("Failed to persist admin tab:", e);
+    }
+  };
 
   return (
     <div style={{

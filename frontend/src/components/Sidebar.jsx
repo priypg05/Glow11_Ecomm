@@ -30,6 +30,22 @@ export default function Sidebar({ page, setPage, user, onLogout }) {
         <p style={{ fontSize: "0.68rem", color: C.muted, marginTop: 2, textTransform: "uppercase", letterSpacing: "0.5px" }}>
           Admin Dashboard
         </p>
+        <div style={{ marginTop: 8 }}>
+          <a
+            href="/"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: "0.75rem",
+              color: C.accent2,
+              textDecoration: "none",
+              fontWeight: 600,
+            }}
+          >
+            ← Back to Store
+          </a>
+        </div>
       </div>
 
       {/* User badge */}

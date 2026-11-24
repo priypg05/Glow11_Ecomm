@@ -3,11 +3,28 @@
 
 const envApiUrl = import.meta.env.VITE_API_URL;
 
-// In production, use VITE_API_URL pointing to Render backend.
-// In development, default to http://localhost:8000 (or empty string when using Vite proxy).
-export const API_BASE_URL = envApiUrl
-  ? envApiUrl.replace(/\/$/, "")
-  : "http://localhost:8000";
+// Determine API base URL:
+// 1. If VITE_API_URL is configured, use it (trimmed of trailing slashes).
+// 2. If running on Vercel or any remote production domain and env var was omitted during build,
+//    fallback to the deployed Render backend URL.
+// 3. Otherwise for local development, default to http://localhost:8000.
+const getApiBaseUrl = () => {
+  if (envApiUrl && envApiUrl.trim()) {
+    return envApiUrl.trim().replace(/\/$/, "");
+  }
+  if (
+    typeof window !== "undefined" &&
+    window.location.hostname &&
+    window.location.hostname !== "localhost" &&
+    window.location.hostname !== "127.0.0.1" &&
+    !window.location.hostname.endsWith(".local")
+  ) {
+    return "https://glowiq-backend.onrender.com";
+  }
+  return "http://localhost:8000";
+};
+
+export const API_BASE_URL = getApiBaseUrl();
 
 export const ENDPOINTS = {
   health: `${API_BASE_URL}/health`,

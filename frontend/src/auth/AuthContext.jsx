@@ -6,7 +6,15 @@ const STORAGE_SESSION = "glowiq_session";
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [user,    setUser]    = useState(null);
+  // Synchronously restore user from localStorage to avoid session loss on reload
+  const [user, setUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_SESSION);
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
   const [dbReady, setDbReady] = useState(false);
   const [error,   setError]   = useState(null);
   const initDone = useRef(false);
@@ -19,13 +27,6 @@ export function AuthProvider({ children }) {
     (async () => {
       try {
         await initDB();
-        // Restore session from localStorage after backend is ready
-        try {
-          const saved = localStorage.getItem(STORAGE_SESSION);
-          if (saved) setUser(JSON.parse(saved));
-        } catch {
-          // ignore corrupt session
-        }
         setDbReady(true);
       } catch (e) {
         console.error("Failed to connect to backend:", e.message);
@@ -35,25 +36,30 @@ export function AuthProvider({ children }) {
     })();
   }, []);
 
-  // ── Keep session in localStorage in sync ────────────────────────────────
-  useEffect(() => {
-    if (user) {
-      localStorage.setItem(STORAGE_SESSION, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(STORAGE_SESSION);
-    }
-  }, [user]);
-
   // ── Login ────────────────────────────────────────────────────────────────
   const login = async (email, password) => {
     if (!dbReady) return { ok: false, message: "Database not ready yet." };
     const result = await dbLogin(email, password);
-    if (result.ok) setUser(result.user);
+    if (result.ok && result.user) {
+      setUser(result.user);
+      try {
+        localStorage.setItem(STORAGE_SESSION, JSON.stringify(result.user));
+      } catch (e) {
+        console.error("Failed to save session:", e);
+      }
+    }
     return result;
   };
 
   // ── Logout ───────────────────────────────────────────────────────────────
-  const logout = () => setUser(null);
+  const logout = () => {
+    setUser(null);
+    try {
+      localStorage.removeItem(STORAGE_SESSION);
+    } catch (e) {
+      console.error("Failed to clear session:", e);
+    }
+  };
 
   return (
     <AuthContext.Provider value={{ user, login, logout, dbReady, error }}>

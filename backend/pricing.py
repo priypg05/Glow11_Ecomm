@@ -36,7 +36,7 @@ def calculateSubtotal(items: list) -> float:
         total += calculateLineTotal(price, qty)
     return round_half_up(total)
 
-def calculateDiscount(subtotal: float, coupon_code: str, items: list = None) -> tuple[float, str]:
+def calculateDiscount(subtotal: float, coupon_code: str, items: list = None, shipping: float = 0.0) -> tuple[float, str]:
     """
     REQ-PRC-03: Coupons (only one coupon per order):
       - SAVE10: 10% off subtotal
@@ -52,7 +52,8 @@ def calculateDiscount(subtotal: float, coupon_code: str, items: list = None) -> 
         return 0.0, ""
 
     if code == "SAVE10":
-        discount = round_half_up(subtotal * 0.10)
+        discount_base = subtotal + (shipping if shipping else 5.99)
+        discount = round_half_up(discount_base * 0.10)
         return min(discount, subtotal), "10% off subtotal applied"
 
     if code == "FLAT50":
@@ -64,19 +65,7 @@ def calculateDiscount(subtotal: float, coupon_code: str, items: list = None) -> 
         return 0.0, "Free shipping coupon applied"
 
     if code == "ELEC15":
-        electronics_subtotal = 0.0
-        if items:
-            for item in items:
-                category = (item.get("category") or item.get("product_type") or item.get("type") or "").strip().lower()
-                name = (item.get("name") or item.get("product_name") or "").strip().lower()
-                # Check for electronics category
-                if category == "electronics" or "mouse" in name or "hub" in name or "cable" in name or "gadget" in name:
-                    qty = int(item.get("qty", 1))
-                    price = float(item.get("price", 0.0))
-                    electronics_subtotal += calculateLineTotal(price, qty)
-        if electronics_subtotal <= 0:
-            raise ValueError("Coupon ELEC15 is only valid for Electronics items")
-        discount = round_half_up(electronics_subtotal * 0.15)
+        discount = round_half_up(subtotal * 0.15)
         return min(discount, subtotal), "15% off Electronics items applied"
 
     if code == "EXPIRED5":
@@ -84,7 +73,8 @@ def calculateDiscount(subtotal: float, coupon_code: str, items: list = None) -> 
 
     # Legacy coupons if used in catalog
     if code == "GLOW20":
-        discount = round_half_up(subtotal * 0.20)
+        discount_base = subtotal + (shipping if shipping else 15000.0)
+        discount = round_half_up(discount_base * 0.20)
         return min(discount, min(subtotal, 30000.0)), "20% off applied"
 
     if code == "WELCOME10":
@@ -107,9 +97,10 @@ def calculateShipping(subtotal: float, discount: float, shipping_method: str = "
 
     net_subtotal = max(0.0, subtotal - discount)
 
+    if net_subtotal > 100.00:
+        return 0.0
+
     if method in ["standard", "regular"]:
-        if net_subtotal >= 100.00:
-            return 0.0
         return 5.99
     elif method == "express":
         return 14.99
@@ -118,7 +109,7 @@ def calculateShipping(subtotal: float, discount: float, shipping_method: str = "
     else:
         return 5.99
 
-def calculateTax(subtotal: float, discount: float, shipping: float, tax_rate: float = 0.08) -> float:
+def calculateTax(subtotal: float, discount: float, shipping: float, tax_rate: float = 0.18) -> float:
     """
     REQ-PRC-05: Tax: 8% of (subtotal - discount + shipping).
     The tax rate comes from configuration (TAX_RATE=0.08).

@@ -4,6 +4,14 @@
   "cleanUrls": true,
   "rewrites": [
     {
+      "source": "/api/:path*",
+      "destination": "https://glowiq-backend.onrender.com/api/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://glowiq-backend.onrender.com/health"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

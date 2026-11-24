@@ -1,7 +1,8 @@
 // src/pages/LoginPage.jsx — ShopLab Login/Register/Forgot/Reset Password
 import { useState, useEffect } from "react";
 import { useAuth } from "../auth/AuthContext";
-import { dbRegister, dbAdminRegister } from "../auth/db";
+import { dbRegister, dbAdminRegister, hashPassword } from "../auth/db";
+import { ENDPOINTS } from "../config/api";
 
 // PaymentGateway Blossom theme
 const T = {
@@ -64,12 +65,14 @@ export default function LoginPage({ onSuccess, onCancel }) {
   const handleLogin = async (e) => {
     e.preventDefault();
     setError(""); setSuccess("");
-    if (!email.trim() || !password) {
+    const cleanEmail = email.trim();
+    const cleanPassword = password.trim();
+    if (!cleanEmail || !cleanPassword) {
       setError("Please enter both email and password.");
       return;
     }
     setLoading(true);
-    const result = await login(email.trim(), password);
+    const result = await login(cleanEmail, cleanPassword);
     if (!result.ok) {
       setError(result.message || "Invalid email or password");
     } else {
@@ -131,7 +134,7 @@ export default function LoginPage({ onSuccess, onCancel }) {
     }
     setLoading(true);
     try {
-      const resp = await fetch("/api/auth/forgot-password", {
+      const resp = await fetch(ENDPOINTS.auth.forgotPassword, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: forgotEmail.trim() }),
@@ -157,10 +160,11 @@ export default function LoginPage({ onSuccess, onCancel }) {
     }
     setLoading(true);
     try {
-      const resp = await fetch("/api/auth/reset-password", {
+      const hashedPassword = await hashPassword(newPassword);
+      const resp = await fetch(ENDPOINTS.auth.resetPassword, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: resetToken, new_password: newPassword }),
+        body: JSON.stringify({ token: resetToken, new_password: hashedPassword }),
       });
       const data = await resp.json();
       if (!resp.ok) {
@@ -265,7 +269,7 @@ export default function LoginPage({ onSuccess, onCancel }) {
 
               <button
                 type="submit"
-                data-testid="login-submit-button"
+                data-testid="btn-login"
                 disabled={loading || !dbReady}
                 className="lp-btn"
                 style={{ width: "100%", padding: "14px", borderRadius: 12, border: "none", background: T.accentGrad, color: "#fff", fontSize: "0.95rem", fontWeight: 700, cursor: "pointer" }}

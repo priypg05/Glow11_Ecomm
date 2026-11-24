@@ -4,8 +4,11 @@ import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, Legend,
 } from "recharts";
 import { DATA } from "../data/dashboardData";
-import { C, COLORS, fmtRs} from "../theme/colors";
+import { C, COLORS, fmtRp } from "../theme/colors";
 import { Card, SectionTitle, TT } from "../components/Shared";
+
+// Safe formatter fallback
+const formatPrice = typeof fmtRp === "function" ? fmtRp : (n) => "Rp " + Math.round(Number(n) || 0).toLocaleString("id-ID");
 
 export default function BrandsPage() {
   return (
@@ -53,7 +56,7 @@ export default function BrandsPage() {
                 <div style={{ width: `${(b.count / 82) * 100}%`, background: COLORS[i % COLORS.length], borderRadius: 4, height: 8 }} />
               </div>
               <span style={{ color: C.muted,   fontSize: "0.78rem" }}>{b.count} products</span>
-              <span style={{ color: C.accent4, fontSize: "0.78rem" }}>{fmtRp(b.avgPrice)}</span>
+              <span style={{ color: C.accent4, fontSize: "0.78rem" }}>{formatPrice(b.avgPrice)}</span>
             </div>
           ))}
         </div>

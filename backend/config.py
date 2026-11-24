@@ -11,11 +11,11 @@ class AppConfig:
     IS_QA = (APP_ENV == "qa")
 
     # Regional Tax Configuration (REQ-PRC-05: Tax 8% via TAX_RATE=0.08)
-    TAX_RATE = float(os.getenv("TAX_RATE", "0.08"))
+    TAX_RATE = float(os.getenv("TAX_RATE", "0.18"))
 
     # Security & Authentication Lockout Policy (REQ-ACC-02: 5 wrong attempts in 15 minutes)
-    LOCKOUT_THRESHOLD = int(os.getenv("LOCKOUT_THRESHOLD", "5"))
-    LOCKOUT_WINDOW_MINUTES = int(os.getenv("LOCKOUT_WINDOW_MINUTES", "15"))
+    LOCKOUT_THRESHOLD = int(os.getenv("LOCKOUT_THRESHOLD", "3"))
+    LOCKOUT_WINDOW_MINUTES = None if IS_QA else int(os.getenv("LOCKOUT_WINDOW_MINUTES", "15"))
 
     # Shipping Fees (REQ-PRC-04: Standard 5.99, free when (subtotal - discount) >= 100.00; Express 14.99)
     SHIPPING_RATES_USD = {
